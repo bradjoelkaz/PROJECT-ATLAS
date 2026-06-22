@@ -34,6 +34,9 @@ from fastapi.staticfiles import StaticFiles
 from google import genai
 from google.genai import types
 import uvicorn
+from pydantic import BaseModel
+from typing import List, Optional
+from agent_helper import AntigravityHelper
 
 # ----------------------------------------------------------------------------
 # 환경 설정
@@ -91,6 +94,57 @@ async def health() -> dict:
         "host_language": HOST_LANGUAGE,
         "api_key_present": bool(API_KEY),
     }
+
+
+class DialogueItem(BaseModel):
+    speaker: str
+    original: str
+    translated: Optional[str] = ""
+
+
+class ReportRequest(BaseModel):
+    history: List[DialogueItem]
+
+
+@app.post("/api/agent/report")
+async def generate_report(req: ReportRequest):
+    """Antigravity 에이전트를 사용하여 대화 기록 요약 및 정보 검색 리포트를 생성합니다."""
+    if not req.history:
+        return {"success": False, "error_type": "empty_history", "message": "대화 기록이 비어 있습니다."}
+
+    loop = asyncio.get_running_loop()
+    try:
+        # Pydantic 모델 리스트를 dict 리스트로 변환
+        history_list = [item.dict() for item in req.history]
+        helper = AntigravityHelper()
+        res = await loop.run_in_executor(None, helper.analyze_dialogue_history, history_list)
+
+        if res.startswith("에이전트 실행 실패:"):
+            res_lower = res.lower()
+            if "429" in res_lower or "quota" in res_lower or "too_many_requests" in res_lower or "permission" in res_lower:
+                return {
+                    "success": False,
+                    "error_type": "quota_limit",
+                    "message": "Gemini API의 Antigravity 에이전트(Interactions API) 할당량이 부족합니다.\nGoogle AI Studio에서 Interactions API 권한이나 billing 상태를 확인해 주세요.",
+                    "raw_error": res
+                }
+            return {
+                "success": False,
+                "error_type": "api_error",
+                "message": "에이전트 실행 중 오류가 발생했습니다.",
+                "raw_error": res
+            }
+
+        return {
+            "success": True,
+            "report": res
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error_type": "internal_error",
+            "message": f"서버 내부 오류: {str(e)}"
+        }
 
 
 @app.websocket("/ws")
@@ -250,6 +304,29 @@ class CallRoom:
         self.in_q = {"driver": asyncio.Queue(), "passenger": asyncio.Queue()}  # 역할별 입력 오디오 큐
         self.task = None
         self.started = False
+        self.active_speaker = None  # 현재 말하고 있는 역할 ("driver", "passenger", None)
+
+    async def set_active_speaker(self, role: str) -> None:
+        print(f"CallRoom: set_active_speaker({role}) called. current active_speaker={self.active_speaker}", flush=True)
+        if self.active_speaker is None:
+            self.active_speaker = role
+            other_role = "passenger" if role == "driver" else "driver"
+            print(f"CallRoom: Locking other_role={other_role}. Sending other_speaking: True", flush=True)
+            await self.send_to(other_role, {"type": "other_speaking", "active": True})
+
+    async def clear_active_speaker(self, role: str) -> None:
+        if self.active_speaker == role:
+            print(f"CallRoom: clear_active_speaker({role}). Unlocking", flush=True)
+            self.active_speaker = None
+            other_role = "passenger" if role == "driver" else "driver"
+            await self.send_to(other_role, {"type": "other_speaking", "active": False})
+
+    async def schedule_auto_unlock(self, role: str) -> None:
+        """오디오 전송 종료(audio_end) 후 3.5초 뒤에 자동으로 잠금을 해제하는 안전장치"""
+        await asyncio.sleep(3.5)
+        if self.active_speaker == role:
+            print(f"CallRoom: Auto-unlock safeguard fired for {role}", flush=True)
+            await self.clear_active_speaker(role)
 
     async def send_to(self, role: str, payload: dict) -> None:
         ws = self.ws.get(role)
@@ -322,6 +399,7 @@ class CallRoom:
                                         "data": base64.b64encode(inline.data).decode("ascii")})
                         if sc.turn_complete:
                             await self.send_to(listener_role, {"type": "turn_complete"})
+                            await self.clear_active_speaker(speaker_role)
 
                 await asyncio.gather(
                     feed(sess_driver, "driver"),
@@ -383,14 +461,20 @@ async def ws_call(websocket: WebSocket) -> None:
             msg = json.loads(await websocket.receive_text())
             mtype = msg.get("type")
             if mtype == "audio":
+                print(f"ws_call: received audio from {role}", flush=True)
+                await room.set_active_speaker(role)
                 await room.in_q[role].put(("audio", base64.b64decode(msg["data"])))
             elif mtype == "audio_end":
+                print(f"ws_call: received audio_end from {role}", flush=True)
                 await room.in_q[role].put(("audio_end", None))
+                if room.active_speaker == role:
+                    asyncio.create_task(room.schedule_auto_unlock(role))
     except WebSocketDisconnect:
         pass
     finally:
         if room.ws.get(role) is websocket:
             room.ws[role] = None
+        await room.clear_active_speaker(role)
         await room.broadcast_presence()
         # 두 참가자 모두 나가면 방과 세션을 정리한다.
         async with rooms_lock:

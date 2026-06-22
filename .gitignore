@@ -1,0 +1,43 @@
+# Environment variables (DANGER: Do not commit API keys)
+.env
+backend/.env
+.env.local
+.env.*.local
+
+# Python virtual environments
+.venv/
+backend/.venv/
+venv/
+ENV/
+env/
+
+# Python compiler cache and build artifacts
+__pycache__/
+backend/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# IDE metadata
+.vscode/
+.idea/
+.cursor/
+.codex/
+.zed/
+.gemini/
+
+# Project configuration & local MCP metadata
+.mcp.json
+opencode.json
+config/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+Desktop.ini

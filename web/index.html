@@ -211,6 +211,145 @@
       height: 100%; color: var(--muted); gap: 10px; font-size: 14px;
     }
 
+    /* AI 리포트 스타일 */
+    .modal-toolbar {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      background: #141720;
+    }
+    .report-btn {
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 700;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: white;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    .report-btn:hover {
+      opacity: 0.9;
+    }
+    .report-btn:active {
+      transform: scale(0.97);
+    }
+    .report-btn:disabled {
+      background: #1f2937;
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    .report-card {
+      background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(124, 58, 237, 0.08));
+      border: 1px solid rgba(124, 58, 237, 0.25);
+      border-radius: 18px;
+      padding: 18px;
+      margin-bottom: 18px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+      animation: fadeIn 0.3s ease-out;
+    }
+    .report-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.15);
+      padding-bottom: 8px;
+    }
+    .report-title {
+      font-size: 14px;
+      font-weight: 800;
+      color: #a78bfa;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .report-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 16px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: background 0.2s;
+    }
+    .report-close:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+    }
+    .report-body {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #cbd5e1;
+    }
+    .report-body h3 {
+      font-size: 15px;
+      margin: 14px 0 6px;
+      color: #e2e8f0;
+    }
+    .report-body p {
+      margin: 0 0 10px;
+    }
+    .report-body ul {
+      margin: 0 0 12px;
+      padding-left: 20px;
+    }
+    .report-body li {
+      margin-bottom: 4px;
+    }
+    .report-warning {
+      background: rgba(217, 119, 6, 0.15);
+      border: 1px solid rgba(217, 119, 6, 0.3);
+      color: #f59e0b;
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+    
+    /* 로딩 펄스 애니메이션 */
+    .report-loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 24px 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .pulse-loader {
+      display: flex;
+      gap: 6px;
+    }
+    .pulse-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #7c3aed;
+      animation: pulse 1.4s infinite ease-in-out both;
+    }
+    .pulse-dot:nth-child(1) { animation-delay: -0.32s; }
+    .pulse-dot:nth-child(2) { animation-delay: -0.16s; }
+
+    @keyframes pulse {
+      0%, 80%, 100% { transform: scale(0); }
+      40% { transform: scale(1.0); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
     .footer { font-size: 11px; color: var(--muted); text-align: center; padding: 16px 0 12px; }
   </style>
 </head>
@@ -284,6 +423,17 @@
         <h2>📜 대화 기록 전체보기</h2>
         <button class="close-btn" id="historyCloseBtn">✕</button>
       </div>
+
+      <!-- AI 리포트 툴바 -->
+      <div class="modal-toolbar">
+        <span style="font-size: 13px; color: var(--muted);" id="reportStatusText">AI 대화 리포트를 생성할 수 있습니다.</span>
+        <button id="generateReportBtn" class="report-btn" disabled>✨ AI 리포트 생성</button>
+      </div>
+
+      <!-- AI 리포트 컨테이너 -->
+      <div id="reportContainer" class="hidden" style="padding: 16px 16px 0; overflow-y: auto; border-bottom: 1px dashed var(--line); flex-shrink: 0; max-height: 40%;">
+      </div>
+
       <div class="chat-feed" id="historyChatFeed">
         <div class="empty-history">
           <span>📜 아직 완료된 대화가 없습니다.</span>
@@ -507,6 +657,11 @@
       sending = false;
       vadSilenceFrames = 0;
       currentSpeaker = lastActiveSpeaker;
+
+      if (streamer) {
+        try { streamer.stop(); } catch (e) {}
+        try { streamer.resume(); } catch (e) {}
+      }
       
       if (currentSpeaker === "host") {
         liveHostCard.className = "subtitle-card highlight-host active-input";
@@ -541,8 +696,11 @@
         return;
       }
 
+      // 에코 방지: 번역 음성이 스피커로 재생되는 동안에는 새 발화 감지를 막는다.
+      const speakerBusy = streamer && streamer.isPlaying && (outputCtx && outputCtx.currentTime < streamer.scheduledTime);
+
       // 히스테리시스: 아직 말 안 하는 중이면 '시작 임계'를, 말하는 중이면 더 낮은 '유지 임계'를 적용.
-      const isVoice = vadSpeaking ? (rms > stopThr) : (rms > startThr);
+      const isVoice = vadSpeaking ? (rms > stopThr) : (rms > startThr && !speakerBusy);
 
       if (isVoice) {
         vadSilenceFrames = 0;
@@ -587,8 +745,8 @@
             }, 8000);
           }
         } else {
-          vadMeterLabel.textContent = "소리 대기";
-          vadMeterLabel.style.color = "var(--muted)";
+          vadMeterLabel.textContent = speakerBusy ? "🔊 번역 재생 중 (대기)" : "소리 대기";
+          vadMeterLabel.style.color = speakerBusy ? "#f59e0b" : "var(--muted)";
         }
       }
     }
@@ -656,6 +814,9 @@
             playPcm(chunk);
             break;
           case "turn_complete":
+            if (streamer) {
+              try { streamer.flush(); } catch (e) {}
+            }
             if (finalizeTimer) {
               clearTimeout(finalizeTimer);
               finalizeTimer = null;
@@ -783,6 +944,11 @@
 
       if (inputCtx && inputCtx.state === "suspended") inputCtx.resume();
       if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
+
+      if (streamer) {
+        try { streamer.stop(); } catch (e) {}
+        try { streamer.resume(); } catch (e) {}
+      }
       
       sending = true;
       currentSpeaker = speaker;
@@ -856,6 +1022,11 @@
     }
 
     function renderHistory() {
+      const generateReportBtn = document.getElementById("generateReportBtn");
+      if (generateReportBtn) {
+        generateReportBtn.disabled = (dialogueHistory.length === 0);
+      }
+
       historyChatFeed.innerHTML = "";
       if (dialogueHistory.length === 0) {
         historyChatFeed.innerHTML = `
@@ -933,14 +1104,229 @@
     wireButton(guestBtn, "guest");
     wireButton(hostBtn, "host");
 
+    function resetAppState() {
+      // 1. 타이머 정리
+      if (finalizeTimer) { clearTimeout(finalizeTimer); finalizeTimer = null; }
+      if (stopSendingTimer) { clearTimeout(stopSendingTimer); stopSendingTimer = null; }
+      if (vadSilenceTimer) { clearTimeout(vadSilenceTimer); vadSilenceTimer = null; }
+
+      // 2. 오디오 스트리머 정지
+      if (streamer) {
+        try { streamer.stop(); } catch (e) {}
+      }
+
+      // 3. 발화 및 전송 상태 초기화
+      sending = false;
+      vadSpeaking = false;
+      vadSilenceFrames = 0;
+      currentSpeaker = null;
+      lastActiveSpeaker = "host";
+      preRollBuffer = [];
+
+      // 4. 자막 데이터 누적치 초기화
+      currentHostInput = "";
+      currentHostTrans = "";
+      currentGuestInput = "";
+      currentGuestTrans = "";
+      currentAudioChunks = [];
+
+      // 5. UI 카드 디폴트 복원
+      liveHostCard.className = "subtitle-card";
+      liveHostText.textContent = "대기 중...";
+      liveGuestCard.className = "subtitle-card";
+      liveGuestText.textContent = "대기 중...";
+
+      // 핸즈프리(VAD) 모드 활성화 시 새로운 화자 대기 상태(Host)로 즉시 Rearm
+      if (handsfreeToggle.checked) {
+        rearmHandsfreeSpeaker();
+      }
+    }
+
     // 승객 언어 변경: 이미 연결돼 있으면 새 언어로 세션 재연결
     langSelect.addEventListener("change", () => {
       guestLang = langSelect.value;
       if (inputCtx && ws) {
+        resetAppState();
         try { ws.close(); } catch (e) {}
         connectWs();
       }
     });
+
+    function parseMarkdown(text) {
+      if (!text) return "";
+      let html = escapeHtml(text);
+      html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+      html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+      html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+      html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      
+      const lines = html.split('\n');
+      let inList = false;
+      for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+        if (line.startsWith('- ') || line.startsWith('* ')) {
+          let content = line.substring(2);
+          if (!inList) {
+            lines[i] = '<ul><li>' + content + '</li>';
+            inList = true;
+          } else {
+            lines[i] = '<li>' + content + '</li>';
+          }
+        } else {
+          if (inList) {
+            lines[i] = '</ul>' + (line ? '<p>' + line + '</p>' : '');
+            inList = false;
+          } else {
+            if (line && !line.startsWith('<h') && !line.startsWith('</h')) {
+              lines[i] = '<p>' + line + '</p>';
+            }
+          }
+        }
+      }
+      if (inList) {
+        lines.push('</ul>');
+      }
+      return lines.join('\n');
+    }
+
+    async function generateAiReport() {
+      const generateReportBtn = document.getElementById("generateReportBtn");
+      const reportContainer = document.getElementById("reportContainer");
+      const reportStatusText = document.getElementById("reportStatusText");
+      
+      if (dialogueHistory.length === 0) return;
+      
+      generateReportBtn.disabled = true;
+      reportStatusText.textContent = "AI가 대화를 분석 중입니다...";
+      
+      reportContainer.classList.remove("hidden");
+      reportContainer.innerHTML = `
+        <div class="report-loading">
+          <div class="pulse-loader">
+            <div class="pulse-dot"></div>
+            <div class="pulse-dot"></div>
+            <div class="pulse-dot"></div>
+          </div>
+          <span style="font-size: 13px; color: var(--muted); margin-top: 6px;">
+            Google Antigravity Agent를 구동하고 있습니다.<br>
+            샌드박스 보안 서버 프로비저닝으로 인해 약 15~20초 소요됩니다.
+          </span>
+        </div>
+      `;
+      
+      try {
+        const cleanHistory = dialogueHistory.map(item => ({
+          speaker: item.speaker,
+          original: item.original,
+          translated: item.translated || ""
+        }));
+        
+        const response = await fetch("/api/agent/report", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ history: cleanHistory })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+          reportStatusText.textContent = "리포트 생성 완료!";
+          const htmlContent = parseMarkdown(result.report);
+          
+          reportContainer.innerHTML = `
+            <div class="report-card">
+              <div class="report-header">
+                <span class="report-title">✨ Antigravity AI 운행 리포트</span>
+                <button class="report-close" id="closeReportBtn">✕</button>
+              </div>
+              <div class="report-body">
+                ${htmlContent}
+              </div>
+            </div>
+          `;
+          
+          document.getElementById("closeReportBtn").addEventListener("click", () => {
+            reportContainer.classList.add("hidden");
+            reportContainer.innerHTML = "";
+            reportStatusText.textContent = "AI 대화 리포트를 생성할 수 있습니다.";
+            generateReportBtn.disabled = false;
+          });
+        } else {
+          reportStatusText.textContent = "오류 발생";
+          
+          if (result.error_type === "quota_limit") {
+            reportContainer.innerHTML = `
+              <div class="report-card" style="border-color: rgba(217, 119, 6, 0.4); background: rgba(217, 119, 6, 0.05);">
+                <div class="report-header">
+                  <span class="report-title" style="color: #f59e0b;">⚠️ API 할당량/권한 부족</span>
+                  <button class="report-close" id="closeReportBtn">✕</button>
+                </div>
+                <div class="report-body">
+                  <div class="report-warning">
+                    <strong>Interactions API (Preview) 제한 발생:</strong><br>
+                    사용 중인 Gemini API 키에 에이전트(샌드박스 코드 실행/검색 루프)를 실행할 수 있는 프리뷰 할당량이나 권한이 부족합니다.
+                  </div>
+                  <p style="font-size: 13px;">이 기능은 백엔드 및 프론트엔드 파이프라인이 완벽히 연동되어 있으나, 구글 API 정책에 따라 에이전트 구동이 불가능합니다. 추후 <strong>Google AI Studio</strong>에서 Managed Agent 권한이 허용된 키를 사용하시면 즉시 운행 리포트가 정상 생성됩니다.</p>
+                  <p style="font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px;">
+                    상세 에러 로그: ${escapeHtml(result.raw_error)}
+                  </p>
+                </div>
+              </div>
+            `;
+          } else {
+            reportContainer.innerHTML = `
+              <div class="report-card" style="border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05);">
+                <div class="report-header">
+                  <span class="report-title" style="color: #ef4444;">❌ 에이전트 오류</span>
+                  <button class="report-close" id="closeReportBtn">✕</button>
+                </div>
+                <div class="report-body">
+                  <p style="color: #fca5a5;">리포트를 생성하지 못했습니다. 아래 상세 정보를 확인하세요.</p>
+                  <p style="font-size: 13px; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 6px; font-family: monospace;">
+                    ${escapeHtml(result.message || result.raw_error)}
+                  </p>
+                </div>
+              </div>
+            `;
+          }
+          
+          document.getElementById("closeReportBtn").addEventListener("click", () => {
+            reportContainer.classList.add("hidden");
+            reportContainer.innerHTML = "";
+            reportStatusText.textContent = "AI 대화 리포트를 생성할 수 있습니다.";
+            generateReportBtn.disabled = false;
+          });
+        }
+      } catch (err) {
+        reportStatusText.textContent = "네트워크 오류";
+        reportContainer.innerHTML = `
+          <div class="report-card" style="border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05);">
+            <div class="report-header">
+              <span class="report-title" style="color: #ef4444;">❌ 연결 오류</span>
+              <button class="report-close" id="closeReportBtn">✕</button>
+            </div>
+            <div class="report-body">
+              <p>서버와 통신할 수 없습니다: ${escapeHtml(err.message)}</p>
+            </div>
+          </div>
+        `;
+        document.getElementById("closeReportBtn").addEventListener("click", () => {
+          reportContainer.classList.add("hidden");
+          reportContainer.innerHTML = "";
+          reportStatusText.textContent = "AI 대화 리포트를 생성할 수 있습니다.";
+          generateReportBtn.disabled = false;
+        });
+      } finally {
+        generateReportBtn.disabled = (dialogueHistory.length === 0);
+      }
+    }
+
+    const generateReportBtn = document.getElementById("generateReportBtn");
+    if (generateReportBtn) {
+      generateReportBtn.addEventListener("click", generateAiReport);
+    }
 
     historyOpenBtn.addEventListener("click", openHistoryModal);
     historyCloseBtn.addEventListener("click", closeHistoryModal);

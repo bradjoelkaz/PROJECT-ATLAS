@@ -4,24 +4,24 @@
 // 의존성 없는 순수 JS로 이식한 버전. 24kHz PCM16 → Float32 변환 후,
 // 큐잉 + AudioContext 시간축 스케줄링으로 끊김/지지직 없이 연속 재생한다.
 //
-// 핵심:
-//  - 들어온 PCM을 7680샘플(약 320ms) 단위로 묶어 큐에 적재 (조각 과다 방지)
-//  - 100ms 초기 지터버퍼 후 재생 시작
-//  - scheduledTime 을 누적하며 "과거에 예약하지 않도록" max(scheduledTime, now) 보정
-//  - 큐가 비면 100ms 간격으로 폴링하다가 새 오디오가 오면 이어서 스케줄
-//  - createBufferSource 기반(워크릿 아님) → 모바일 무음 버그 없음
+// 핵심 개선 사항 (QA 반영):
+//  - 들어온 PCM을 임시 버퍼에 누적 후 2048샘플(약 85ms) 단위로 쪼개 큐에 적재 (오버헤드 및 조각화 방지)
+//  - 재생 도중 큐가 비어 소리가 끊기는 현상(Underrun) 발생 시, 150ms 초기 지터버퍼 자동 복구
+//  - setInterval 100ms 폴링 제거: 새 데이터 인입 즉시 스케줄링 처리하여 불필요한 대기 지연(stutter) 차단
+//  - 타이머 중복 생성 방지: nextBufferTimeout 관리로 동시 스케줄러 방지
 
 class AudioStreamer {
   constructor(context) {
     this.context = context;
     this.sampleRate = 24000;
-    this.bufferSize = 7680; // 약 320ms @24kHz
+    this.minChunkSize = 2048; // 약 85ms @24kHz
     this.audioQueue = [];
+    this.leftover = new Float32Array(0);
     this.isPlaying = false;
     this.isStreamComplete = false;
-    this.checkInterval = null;
+    this.nextBufferTimeout = null;
     this.scheduledTime = 0;
-    this.initialBufferTime = 0.1; // 100ms 초기 버퍼
+    this.initialBufferTime = 0.15; // 150ms 초기 버퍼로 지터 노이즈 방어
     this.gainNode = this.context.createGain();
     this.gainNode.connect(this.context.destination);
     this.endOfQueueAudioSource = null;
@@ -45,16 +45,26 @@ class AudioStreamer {
   // chunk: Uint8Array (raw PCM16 little-endian)
   addPCM16(chunk) {
     this.isStreamComplete = false;
-    let processingBuffer = this._processPCM16Chunk(chunk);
-    while (processingBuffer.length >= this.bufferSize) {
-      this.audioQueue.push(processingBuffer.slice(0, this.bufferSize));
-      processingBuffer = processingBuffer.slice(this.bufferSize);
-    }
-    if (processingBuffer.length > 0) this.audioQueue.push(processingBuffer);
+    const newSamples = this._processPCM16Chunk(chunk);
 
-    if (!this.isPlaying) {
-      this.isPlaying = true;
-      this.scheduledTime = this.context.currentTime + this.initialBufferTime;
+    // 샘플 축적 (leftover와 신규 샘플 결합)
+    const combined = new Float32Array(this.leftover.length + newSamples.length);
+    combined.set(this.leftover);
+    combined.set(newSamples, this.leftover.length);
+
+    let processingBuffer = combined;
+    while (processingBuffer.length >= this.minChunkSize) {
+      this.audioQueue.push(processingBuffer.slice(0, this.minChunkSize));
+      processingBuffer = processingBuffer.slice(this.minChunkSize);
+    }
+    this.leftover = processingBuffer;
+
+    if (this.audioQueue.length > 0) {
+      // 1. 아직 재생 전이거나, 2. 중간에 큐가 비어 재생헤드가 스케줄 시점보다 지나간 경우 (버퍼 언더런 복구)
+      if (!this.isPlaying || this.scheduledTime < this.context.currentTime) {
+        this.isPlaying = true;
+        this.scheduledTime = this.context.currentTime + this.initialBufferTime;
+      }
       this.scheduleNextBuffer();
     }
   }
@@ -66,7 +76,13 @@ class AudioStreamer {
   }
 
   scheduleNextBuffer() {
-    const SCHEDULE_AHEAD_TIME = 0.2;
+    const SCHEDULE_AHEAD_TIME = 0.25; // 최대 250ms 앞서 예약
+
+    if (this.nextBufferTimeout) {
+      clearTimeout(this.nextBufferTimeout);
+      this.nextBufferTimeout = null;
+    }
+
     while (
       this.audioQueue.length > 0 &&
       this.scheduledTime < this.context.currentTime + SCHEDULE_AHEAD_TIME
@@ -89,48 +105,57 @@ class AudioStreamer {
       source.buffer = audioBuffer;
       source.connect(this.gainNode);
 
-      // 절대 과거 시점에 예약하지 않도록 보정
+      // 과거 시점에 재생되지 않도록 보정하며 스케줄
       const startTime = Math.max(this.scheduledTime, this.context.currentTime);
       source.start(startTime);
       this.scheduledTime = startTime + audioBuffer.duration;
     }
 
-    if (this.audioQueue.length === 0) {
-      if (this.isStreamComplete) {
-        this.isPlaying = false;
-        if (this.checkInterval) {
-          clearInterval(this.checkInterval);
-          this.checkInterval = null;
-        }
-      } else if (!this.checkInterval) {
-        this.checkInterval = window.setInterval(() => {
-          if (this.audioQueue.length > 0) this.scheduleNextBuffer();
-        }, 100);
-      }
-    } else {
+    // 큐에 잔여량이 있다면 예약 한계 시점 직전에 다음 예약을 실행하도록 타이머 설정
+    if (this.audioQueue.length > 0) {
       const nextCheckTime = (this.scheduledTime - this.context.currentTime) * 1000;
-      setTimeout(() => this.scheduleNextBuffer(), Math.max(0, nextCheckTime - 50));
+      this.nextBufferTimeout = setTimeout(() => {
+        this.nextBufferTimeout = null;
+        this.scheduleNextBuffer();
+      }, Math.max(0, nextCheckTime - 50));
+    } else if (this.isStreamComplete) {
+      this.isPlaying = false;
     }
   }
 
-  // 즉시 중단 + 큐 비우기 (인터럽트/화자 강제전환 시)
+  // 턴 종료(turn_complete) 시 남은 잔여 샘플 강제 렌더링
+  flush() {
+    if (this.leftover && this.leftover.length > 0) {
+      this.audioQueue.push(this.leftover);
+      this.leftover = new Float32Array(0);
+
+      if (!this.isPlaying || this.scheduledTime < this.context.currentTime) {
+        this.isPlaying = true;
+        this.scheduledTime = this.context.currentTime + this.initialBufferTime;
+      }
+      this.scheduleNextBuffer();
+    }
+  }
+
+  // 즉시 중단 + 큐 비우기 (화자 전환 시)
   stop() {
     this.isPlaying = false;
     this.isStreamComplete = true;
     this.audioQueue = [];
+    this.leftover = new Float32Array(0);
     this.scheduledTime = this.context.currentTime;
-    if (this.checkInterval) {
-      clearInterval(this.checkInterval);
-      this.checkInterval = null;
+    if (this.nextBufferTimeout) {
+      clearTimeout(this.nextBufferTimeout);
+      this.nextBufferTimeout = null;
     }
     try {
-      this.gainNode.gain.linearRampToValueAtTime(0, this.context.currentTime + 0.1);
+      this.gainNode.gain.linearRampToValueAtTime(0, this.context.currentTime + 0.05);
     } catch (e) {}
     setTimeout(() => {
       try { this.gainNode.disconnect(); } catch (e) {}
       this.gainNode = this.context.createGain();
       this.gainNode.connect(this.context.destination);
-    }, 200);
+    }, 100);
   }
 
   async resume() {

@@ -114,7 +114,7 @@
     let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
     let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null, pendingPlayReset=false, guestLang="ja", streamer=null;
     let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
-    let myRole=null, roomId=null;
+    let myRole=null, roomId=null, otherSpeaking=false;
 
     const $ = (id) => document.getElementById(id);
     const dot=$("dot"), statusText=$("statusText");
@@ -218,7 +218,20 @@
           case "input_transcript": mineText.textContent=m.text; break;
           case "output_transcript": otherText.textContent=m.text; break;
           case "audio": playPcm(base64ToBuf(m.data)); break;
-          case "turn_complete": pendingPlayReset=true; break;
+          case "other_speaking":
+            otherSpeaking = m.active;
+            if (otherSpeaking) {
+              vadSpeaking = false;
+              sending = false;
+              vadSilenceFrames = 0;
+            }
+            break;
+          case "turn_complete":
+            if (streamer) {
+              try { streamer.flush(); } catch(e) {}
+            }
+            pendingPlayReset=true;
+            break;
           case "error": setStatus("오류: "+m.text,"err"); break;
         }
       };
@@ -226,6 +239,13 @@
 
     // ── 오디오 프레임 처리 + VAD ──
     function onAudioFrame(e){
+      if (otherSpeaking) {
+        preRollBuffer = [];
+        vadMeterBar.style.width = "0%";
+        vadMeterLabel.textContent = "🔊 상대방 발화 중 (마이크 잠금)";
+        vadMeterLabel.style.color = "var(--muted)";
+        return;
+      }
       const int16=new Int16Array(e.data);
       let sumSq=0; for(let i=0;i<int16.length;i++){ const v=int16[i]/0x8000; sumSq+=v*v; }
       const rms=Math.sqrt(sumSq/int16.length);
@@ -262,7 +282,15 @@
         vadSilenceFrames=0;
         vadMeterLabel.textContent="🎙️ 내 음성 전송 중";
         vadMeterLabel.style.color="#34d399";
-        if(!vadSpeaking){ vadSpeaking=true; sending=true; mineText.textContent="말씀하시는 중…"; }
+        if(!vadSpeaking){
+          vadSpeaking=true;
+          sending=true;
+          mineText.textContent="말씀하시는 중…";
+          if (streamer) {
+            try { streamer.stop(); } catch (e) {}
+            try { streamer.resume(); } catch (e) {}
+          }
+        }
       }else{
         if(vadSpeaking){
           vadSilenceFrames++;
