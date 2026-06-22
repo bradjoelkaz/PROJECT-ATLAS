@@ -574,9 +574,13 @@
       src.buffer = audioBuf;
       src.connect(outputCtx.destination);
 
+      const PLAYBACK_LEAD = 0.12; // 약간의 선버퍼(120ms)로 지터에 의한 끊김 방지
       const now = outputCtx.currentTime;
-      if (playHead < now || (playHead - now) > 0.15) {
-        playHead = now;
+      // 재생 헤드가 현재 시각보다 뒤처졌을 때(underrun)만 선버퍼를 두고 다시 맞춘다.
+      // 앞서 있을 때는 절대 되돌리지 않고 그대로 이어붙여 연속 재생한다.
+      // (문장이 버스트로 몰려와도 청크가 겹치지 않고 자연스럽게 이어지도록)
+      if (playHead < now + 0.02) {
+        playHead = now + PLAYBACK_LEAD;
       }
       src.start(playHead);
       playHead += audioBuf.duration;
