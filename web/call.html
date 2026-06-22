@@ -103,7 +103,7 @@
     const VAD_STOP_MULT = 1.4, VAD_STOP_MIN = 0.0035, VAD_SILENCE_LIMIT = 25;
 
     let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
-    let sending=false, playHead=0, playingUntil=0;
+    let sending=false, playHead=0, playingUntil=0, playerNode=null;
     let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
     let myRole=null, roomId=null;
 
@@ -161,7 +161,7 @@
       roomId=roomInput.value.trim();
       try{
         inputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:INPUT_RATE});
-        outputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:OUTPUT_RATE});
+        outputCtx=new (window.AudioContext||window.webkitAudioContext)();
         if(inputCtx.state==="suspended") await inputCtx.resume();
         if(outputCtx.state==="suspended") await outputCtx.resume();
 
@@ -175,6 +175,11 @@
         source.connect(hp).connect(lp).connect(workletNode);
         const silent=inputCtx.createGain(); silent.gain.value=0;
         workletNode.connect(silent).connect(inputCtx.destination);
+
+        // 연속 재생기(지지직/끊김 제거) 로드
+        await outputCtx.audioWorklet.addModule("pcm-player.js");
+        playerNode=new AudioWorkletNode(outputCtx,"pcm-player");
+        playerNode.connect(outputCtx.destination);
 
         // 역할별 라벨
         if(myRole==="driver"){ mineLabel.textContent="내가 한 말 (한국어)"; otherLabel.textContent="승객 말 (한국어로 번역됨)"; }
@@ -273,14 +278,13 @@
       for(let i=0;i<bin.length;i++) b[i]=bin.charCodeAt(i); return b.buffer; }
 
     function playPcm(buf){
-      if(!outputCtx) return;
+      if(!playerNode||!outputCtx) return;
       const int16=new Int16Array(buf); const f32=new Float32Array(int16.length);
       for(let i=0;i<int16.length;i++) f32[i]=int16[i]/0x8000;
-      const ab=outputCtx.createBuffer(1,f32.length,OUTPUT_RATE); ab.getChannelData(0).set(f32);
-      const src=outputCtx.createBufferSource(); src.buffer=ab; src.connect(outputCtx.destination);
-      const PLAYBACK_LEAD=0.12, now=outputCtx.currentTime;
-      if(playHead<now+0.02) playHead=now+PLAYBACK_LEAD;
-      src.start(playHead); playHead+=ab.duration; playingUntil=playHead;
+      const now=outputCtx.currentTime;
+      if(playHead<now) playHead=now;
+      playHead+=f32.length/OUTPUT_RATE; playingUntil=playHead;
+      playerNode.port.postMessage(f32,[f32.buffer]);
     }
   </script>
 </body>

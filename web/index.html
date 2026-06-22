@@ -293,6 +293,8 @@
     let micStream = null;
     let sending = false;
     let playHead = 0;
+    let playingUntil = 0;
+    let playerNode = null;
 
     let dialogueHistory = [];
     let currentAudioChunks = [];
@@ -563,27 +565,19 @@
     }
 
     function playPcm(buf) {
-      if (!outputCtx) return;
+      if (!playerNode || !outputCtx) return;
       const int16 = new Int16Array(buf);
       const f32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
 
-      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
-      audioBuf.getChannelData(0).set(f32);
-      const src = outputCtx.createBufferSource();
-      src.buffer = audioBuf;
-      src.connect(outputCtx.destination);
-
-      const PLAYBACK_LEAD = 0.12; // 약간의 선버퍼(120ms)로 지터에 의한 끊김 방지
+      // 에코 가드용 재생 종료시각 추정 갱신
       const now = outputCtx.currentTime;
-      // 재생 헤드가 현재 시각보다 뒤처졌을 때(underrun)만 선버퍼를 두고 다시 맞춘다.
-      // 앞서 있을 때는 절대 되돌리지 않고 그대로 이어붙여 연속 재생한다.
-      // (문장이 버스트로 몰려와도 청크가 겹치지 않고 자연스럽게 이어지도록)
-      if (playHead < now + 0.02) {
-        playHead = now + PLAYBACK_LEAD;
-      }
-      src.start(playHead);
-      playHead += audioBuf.duration;
+      if (playHead < now) playHead = now;
+      playHead += f32.length / OUTPUT_RATE;
+      playingUntil = playHead;
+
+      // 연속 재생 워크릿으로 샘플 전달 (조각 스케줄 없이 끊김 없는 한 줄기로 재생)
+      playerNode.port.postMessage(f32, [f32.buffer]);
     }
 
     function connectWs() {
@@ -649,7 +643,7 @@
       startBtn.disabled = true;
       try {
         inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: INPUT_RATE });
-        outputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_RATE });
+        outputCtx = new (window.AudioContext || window.webkitAudioContext)();
 
         if (inputCtx.state === "suspended") await inputCtx.resume();
         if (outputCtx.state === "suspended") await outputCtx.resume();
@@ -724,6 +718,11 @@
         const silent = inputCtx.createGain();
         silent.gain.value = 0;
         workletNode.connect(silent).connect(inputCtx.destination);
+
+        // 연속 재생기(지지직/끊김 제거) 로드
+        await outputCtx.audioWorklet.addModule("pcm-player.js");
+        playerNode = new AudioWorkletNode(outputCtx, "pcm-player");
+        playerNode.connect(outputCtx.destination);
 
         connectWs();
 
