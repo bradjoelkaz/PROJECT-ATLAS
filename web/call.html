@@ -65,6 +65,14 @@
           <button class="role-btn guest" id="rolePassenger">🌐 승객<br><small>외국어로 말함</small></button>
         </div>
       </div>
+      <div>
+        <label>🌐 승객 언어 (외국어)</label>
+        <select id="langSelect" style="width:100%;padding:12px;font-size:15px;border-radius:10px;border:1px solid var(--line);background:#0f1115;color:#fff;">
+          <option value="ja">일본어 (日本語)</option>
+          <option value="zh-Hans">중국어 (中文)</option>
+          <option value="en">영어 (English)</option>
+        </select>
+      </div>
       <button class="primary" id="joinBtn" disabled>🎤 통화 입장 (마이크 허용)</button>
     </div>
 
@@ -103,7 +111,7 @@
     const VAD_STOP_MULT = 1.4, VAD_STOP_MIN = 0.0035, VAD_SILENCE_LIMIT = 25;
 
     let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
-    let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null;
+    let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null, pendingPlayReset=false, guestLang="ja";
     let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
     let myRole=null, roomId=null;
 
@@ -159,6 +167,7 @@
     async function join(){
       joinBtn.disabled=true;
       roomId=roomInput.value.trim();
+      guestLang=(document.getElementById("langSelect").value)||"ja";
       try{
         inputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:INPUT_RATE});
         outputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:OUTPUT_RATE});
@@ -187,7 +196,7 @@
 
     function connectWs(){
       const proto=location.protocol==="https:"?"wss":"ws";
-      ws=new WebSocket(`${proto}://${location.host}/ws/call?room=${encodeURIComponent(roomId)}&role=${myRole}`);
+      ws=new WebSocket(`${proto}://${location.host}/ws/call?room=${encodeURIComponent(roomId)}&role=${myRole}&guest_lang=${encodeURIComponent(guestLang)}`);
       ws.onopen=()=>setStatus("방 "+roomId+" 입장됨 — 상대 대기","on");
       ws.onclose=()=>setStatus("연결 종료","err");
       ws.onerror=()=>setStatus("연결 오류","err");
@@ -205,7 +214,7 @@
           case "input_transcript": mineText.textContent=m.text; break;
           case "output_transcript": otherText.textContent=m.text; break;
           case "audio": playPcm(base64ToBuf(m.data)); break;
-          case "turn_complete": if(playerNode) playerNode.port.postMessage({cmd:"flush"}); break;
+          case "turn_complete": pendingPlayReset=true; break;
           case "error": setStatus("오류: "+m.text,"err"); break;
         }
       };
@@ -284,8 +293,7 @@
       audioBuf.getChannelData(0).set(f32);
       const src=outputCtx.createBufferSource(); src.buffer=audioBuf; src.connect(outputCtx.destination);
       const now=outputCtx.currentTime;
-      if(playHead<now+0.02 || (now-lastAudioAt)>0.3) playHead=now+0.08;
-      lastAudioAt=now;
+      if(pendingPlayReset || playHead<now+0.02){ playHead=now+0.08; pendingPlayReset=false; }
       src.start(playHead); playHead+=audioBuf.duration; playingUntil=playHead;
     }
   </script>

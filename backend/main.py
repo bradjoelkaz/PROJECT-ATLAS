@@ -107,11 +107,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     client = genai.Client(api_key=API_KEY)
 
+    # 승객(외국인) 언어를 클라이언트가 선택할 수 있게 쿼리에서 읽는다. 기본은 환경변수값.
+    # 예: ?guest_lang=ja|zh-Hans|en  (to_host 세션은 target=ko로 소스 자동감지라 무관)
+    guest_lang = (websocket.query_params.get("guest_lang") or GUEST_LANGUAGE).strip() or GUEST_LANGUAGE
+
     # 세션 A: 무엇이든 외국어(GUEST)로 듣고 한국어(HOST)로 번역 → 기사가 들음 (출력 방향: to_host)
     cfg_to_host = build_config(target_language_code=HOST_LANGUAGE)
 
-    # 세션 B: 무엇이든 한국어(HOST)로 듣고 외국어(GUEST)로 번역 → 승객이 들음 (출력 방향: to_guest)
-    cfg_to_guest = build_config(target_language_code=GUEST_LANGUAGE)
+    # 세션 B: 한국어(HOST)를 승객 언어로 번역 → 승객이 들음 (출력 방향: to_guest)
+    cfg_to_guest = build_config(target_language_code=guest_lang)
 
     # 현재 활성 화자. "guest"=승객(외국어), "host"=기사(한국어). 기본은 승객.
     state = {"active": "guest"}
@@ -127,7 +131,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             await send_json({
                 "type": "status",
                 "text": "세션 연결됨",
-                "guest_language": GUEST_LANGUAGE,
+                "guest_language": guest_lang,
                 "host_language": HOST_LANGUAGE,
             })
 
@@ -238,8 +242,9 @@ rooms_lock = asyncio.Lock()
 class CallRoom:
     """한 통화방의 두 참가자(driver/passenger)와 Gemini 세션 2개를 관리한다."""
 
-    def __init__(self, room_id: str):
+    def __init__(self, room_id: str, guest_lang: str = None):
         self.room_id = room_id
+        self.guest_lang = (guest_lang or GUEST_LANGUAGE)
         self.client = genai.Client(api_key=API_KEY)
         self.ws = {"driver": None, "passenger": None}      # 역할별 클라이언트 WebSocket
         self.in_q = {"driver": asyncio.Queue(), "passenger": asyncio.Queue()}  # 역할별 입력 오디오 큐
@@ -272,7 +277,7 @@ class CallRoom:
 
     async def _run(self) -> None:
         # driver(한국어) → 외국어로 번역 → passenger 가 들음
-        cfg_driver = build_config(target_language_code=GUEST_LANGUAGE)
+        cfg_driver = build_config(target_language_code=self.guest_lang)
         # passenger(외국어) → 한국어로 번역 → driver 가 들음
         cfg_passenger = build_config(target_language_code=HOST_LANGUAGE)
         try:
@@ -335,11 +340,11 @@ class CallRoom:
             self.started = False
 
 
-async def get_room(room_id: str) -> CallRoom:
+async def get_room(room_id: str, guest_lang: str = None) -> CallRoom:
     async with rooms_lock:
         room = active_rooms.get(room_id)
         if room is None:
-            room = CallRoom(room_id)
+            room = CallRoom(room_id, guest_lang=guest_lang)
             active_rooms[room_id] = room
         return room
 
@@ -363,12 +368,13 @@ async def ws_call(websocket: WebSocket) -> None:
         await websocket.close()
         return
 
-    room = await get_room(room_id)
+    guest_lang = (websocket.query_params.get("guest_lang") or GUEST_LANGUAGE).strip() or GUEST_LANGUAGE
+    room = await get_room(room_id, guest_lang=guest_lang)
     room.ws[role] = websocket
     await room.ensure_started()
     await room.send_to(role, {
         "type": "status", "text": "통화방 입장",
-        "guest_language": GUEST_LANGUAGE, "host_language": HOST_LANGUAGE, "role": role,
+        "guest_language": room.guest_lang, "host_language": HOST_LANGUAGE, "role": role,
     })
     await room.broadcast_presence()
 

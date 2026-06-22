@@ -187,6 +187,15 @@
 
     .bubble-original { font-size: 13px; color: #9ca3af; border-bottom: 1px dashed rgba(255, 255, 255, 0.1); padding-bottom: 6px; }
     .bubble-translated { font-weight: 700; font-size: 15px; color: var(--text); }
+
+    /* 라이브 자막: 원문 + 번역 함께 표시 */
+    .line-orig { font-size: 14px; color: #9ca3af; }
+    .line-trans { font-size: 17px; font-weight: 700; color: var(--text); margin-top: 4px; }
+    /* 승객 언어 선택 */
+    .lang-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+      background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 14px; }
+    .lang-row select { background:#0f1115; color:#fff; border:1px solid var(--line);
+      border-radius:8px; padding:8px 10px; font-size:15px; }
     
     /* 다시 듣기 버튼 */
     .replay-btn {
@@ -218,6 +227,15 @@
 
   <main>
     <button id="startBtn">🎤 시작하기 (마이크 권한 허용)</button>
+
+    <div class="lang-row">
+      <span>🌐 승객 언어</span>
+      <select id="langSelect">
+        <option value="ja">일본어 (日本語)</option>
+        <option value="zh-Hans">중국어 (中文)</option>
+        <option value="en">영어 (English)</option>
+      </select>
+    </div>
 
     <div class="talk-grid">
       <button id="guestBtn" class="talk guest" aria-disabled="true">
@@ -301,9 +319,11 @@
     let currentAudioChunks = [];
     let currentSpeaker = null;
     let currentHostInput = "";
-    let currentHostOutput = "";
+    let currentHostTrans = "";
     let currentGuestInput = "";
-    let currentGuestOutput = "";
+    let currentGuestTrans = "";
+    let guestLang = "ja";
+    let pendingPlayReset = false;
     let finalizeTimer = null;
     let stopSendingTimer = null;
 
@@ -340,6 +360,23 @@
     const historyCloseBtn = document.getElementById("historyCloseBtn");
     const historyChatFeed = document.getElementById("historyChatFeed");
     const historyCountBadge = document.getElementById("historyCountBadge");
+    const langSelect = document.getElementById("langSelect");
+
+    // HTML 이스케이프 (자막 innerHTML 주입 방지)
+    function escapeHtml(s) {
+      return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+    // 라이브 자막: 말한 사람 카드에 원문 + 번역을 함께 표시
+    function renderHostCard() {
+      let h = `<div class="line-orig">${escapeHtml(currentHostInput) || "…"}</div>`;
+      if (currentHostTrans) h += `<div class="line-trans">${escapeHtml(currentHostTrans)}</div>`;
+      liveHostText.innerHTML = h;
+    }
+    function renderGuestCard() {
+      let h = `<div class="line-orig">${escapeHtml(currentGuestInput) || "…"}</div>`;
+      if (currentGuestTrans) h += `<div class="line-trans">${escapeHtml(currentGuestTrans)}</div>`;
+      liveGuestText.innerHTML = h;
+    }
 
     const handsfreeToggle = document.getElementById("handsfreeToggle");
     const vadMeterContainer = document.getElementById("vadMeterContainer");
@@ -417,22 +454,22 @@
 
       let item = null;
       if (currentSpeaker === "host") {
-        if (currentHostInput || currentGuestOutput) {
+        if (currentHostInput || currentHostTrans) {
           item = {
             id: Date.now(),
             speaker: "host",
             original: currentHostInput || "(음성 인식 완료)",
-            translated: currentGuestOutput || "",
+            translated: currentHostTrans || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
       } else if (currentSpeaker === "guest") {
-        if (currentGuestInput || currentHostOutput) {
+        if (currentGuestInput || currentGuestTrans) {
           item = {
             id: Date.now(),
             speaker: "guest",
             original: currentGuestInput || "(음성 인식 완료)",
-            translated: currentHostOutput || "",
+            translated: currentGuestTrans || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
@@ -450,10 +487,11 @@
 
       currentSpeaker = null;
       currentHostInput = "";
-      currentHostOutput = "";
+      currentHostTrans = "";
       currentGuestInput = "";
-      currentGuestOutput = "";
+      currentGuestTrans = "";
       currentAudioChunks = [];
+      pendingPlayReset = true;
     }
 
     function rearmHandsfreeSpeaker() {
@@ -587,13 +625,14 @@
       src.buffer = audioBuf;
       src.connect(outputCtx.destination);
 
-      // 겹침 방지(지지직 완화) + 새 턴 지연 누적 방지.
-      // 이전 청크와 0.3초 이상 떨어졌으면(새 발화 턴) 재생헤드를 현재로 리셋.
+      // 재생헤드: 새 턴(pendingPlayReset)이거나 뒤처졌을 때만 리셋.
+      // 턴 내에서는 이어붙여 끊김 없음. (시간간격 기반 리셋은 응답 중 모델이 잠깐 쉬면
+      //  끊김을 유발해서 제거)
       const now = outputCtx.currentTime;
-      if (playHead < now + 0.02 || (now - lastAudioAt) > 0.3) {
+      if (pendingPlayReset || playHead < now + 0.02) {
         playHead = now + 0.08;
+        pendingPlayReset = false;
       }
-      lastAudioAt = now;
       src.start(playHead);
       playHead += audioBuf.duration;
       playingUntil = playHead;
@@ -601,7 +640,7 @@
 
     function connectWs() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws = new WebSocket(`${proto}://${location.host}/ws?guest_lang=${encodeURIComponent(guestLang)}`);
 
       ws.onopen = () => setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
       ws.onclose = () => setStatus("연결 종료됨", "err");
@@ -618,22 +657,12 @@
             setStatus("세션 연결됨 — 말해보세요", "on");
             break;
           case "input_transcript":
-            if (msg.direction === "to_guest") {
-              currentHostInput = msg.text;
-              liveHostText.textContent = currentHostInput;
-            } else if (msg.direction === "to_host") {
-              currentGuestInput = msg.text;
-              liveGuestText.textContent = currentGuestInput;
-            }
+            if (msg.direction === "to_guest") { currentHostInput += msg.text; renderHostCard(); }
+            else if (msg.direction === "to_host") { currentGuestInput += msg.text; renderGuestCard(); }
             break;
           case "output_transcript":
-            if (msg.direction === "to_guest") {
-              currentGuestOutput = msg.text;
-              liveGuestText.textContent = currentGuestOutput;
-            } else if (msg.direction === "to_host") {
-              currentHostOutput = msg.text;
-              liveHostText.textContent = currentHostOutput;
-            }
+            if (msg.direction === "to_guest") { currentHostTrans += msg.text; renderHostCard(); }
+            else if (msg.direction === "to_host") { currentGuestTrans += msg.text; renderGuestCard(); }
             break;
           case "audio":
             const chunk = base64ToBuf(msg.data);
@@ -770,6 +799,11 @@
       sending = true;
       currentSpeaker = speaker;
       btn.classList.add("active");
+
+      // 새 턴 시작: 해당 화자의 자막 누적 초기화 + 다음 재생은 새 턴으로 리셋
+      pendingPlayReset = true;
+      if (speaker === "host") { currentHostInput = ""; currentHostTrans = ""; }
+      else { currentGuestInput = ""; currentGuestTrans = ""; }
 
       if (speaker === "host") {
         liveHostCard.className = "subtitle-card highlight-host active-input";
@@ -910,6 +944,15 @@
     startBtn.addEventListener("click", start);
     wireButton(guestBtn, "guest");
     wireButton(hostBtn, "host");
+
+    // 승객 언어 변경: 이미 연결돼 있으면 새 언어로 세션 재연결
+    langSelect.addEventListener("change", () => {
+      guestLang = langSelect.value;
+      if (inputCtx && ws) {
+        try { ws.close(); } catch (e) {}
+        connectWs();
+      }
+    });
 
     historyOpenBtn.addEventListener("click", openHistoryModal);
     historyCloseBtn.addEventListener("click", closeHistoryModal);
