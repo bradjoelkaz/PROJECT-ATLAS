@@ -314,6 +314,13 @@
     let vadSilenceFrames = 0; // 침묵 프레임 개수 누적
     const VAD_SILENCE_LIMIT = 25; // 25프레임 * 40ms = 약 1.0초 침묵 시 턴 종결
 
+    // VAD 감도 튜닝 상수 (모바일의 작은 목소리도 감지되도록 하한을 낮춤)
+    const NOISE_MIN = 0.001;        // 노이즈 플로어 최소값(0 방지)
+    const VAD_START_MULT = 2.2;     // 발화 시작 임계 = 노이즈플로어 * 이 값
+    const VAD_START_MIN = 0.0055;   // 발화 시작 임계 절대 하한 (기존 0.008 → 낮춤)
+    const VAD_STOP_MULT = 1.4;      // 발화 유지 임계 = 노이즈플로어 * 이 값 (히스테리시스)
+    const VAD_STOP_MIN = 0.0035;    // 발화 유지 임계 절대 하한
+
     const dot = document.getElementById("dot");
     const statusText = document.getElementById("statusText");
     const startBtn = document.getElementById("startBtn");
@@ -435,14 +442,14 @@
       }
     }
 
-    function handleVad(rms, threshold) {
+    function handleVad(rms, startThr, stopThr) {
       if (!handsfreeToggle.checked) {
         vadMeterContainer.classList.remove("active");
         return;
       }
 
       vadMeterContainer.classList.add("active");
-      const pct = Math.min(100, Math.round((rms / 0.1) * 100));
+      const pct = Math.min(100, Math.round((rms / 0.08) * 100));
       vadMeterBar.style.width = pct + "%";
 
       if (!currentSpeaker) {
@@ -451,7 +458,10 @@
         return;
       }
 
-      if (rms > threshold) {
+      // 히스테리시스: 아직 말 안 하는 중이면 '시작 임계'를, 말하는 중이면 더 낮은 '유지 임계'를 적용.
+      const isVoice = vadSpeaking ? (rms > stopThr) : (rms > startThr);
+
+      if (isVoice) {
         vadSilenceFrames = 0;
         vadMeterLabel.textContent = "🎙️ 음성 감지 전송";
         vadMeterLabel.style.color = currentSpeaker === "host" ? "#60a5fa" : "#34d399";
@@ -473,7 +483,7 @@
       } else {
         if (vadSpeaking) {
           vadSilenceFrames++;
-          const remainingSec = Math.max(0, ((VAD_SILENCE_LIMIT - vadSilenceFrames) * 0.04).toFixed(1));
+          const remainingSec = Math.max(0, (VAD_SILENCE_LIMIT - vadSilenceFrames) * 0.04).toFixed(1);
           vadMeterLabel.textContent = `침묵 감지 (${remainingSec}초 남음)`;
           vadMeterLabel.style.color = "#f59e0b";
 
@@ -481,7 +491,7 @@
             vadSpeaking = false;
             sending = false;
             vadSilenceFrames = 0;
-            
+
             console.log("Dynamic VAD: Speech Ended");
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: "audio_end" }));
@@ -630,16 +640,22 @@
             sumSq += val * val;
           }
           const rms = Math.sqrt(sumSq / int16.length);
-          
-          // 동적 소음 측정 (Adaptive Noise Floor)
-          if (rms < noiseFloor) {
-            noiseFloor = rms;
-          } else {
-            noiseFloor = noiseFloor * 0.999 + rms * 0.001;
+
+          // 적응형 소음 바닥(Adaptive Noise Floor)
+          // - 말하는 중(vadSpeaking)이 아닐 때만 주변 소음에 천천히 적응시킨다.
+          //   → 큰 목소리에 바닥이 끌려 올라가 다음 발화를 못 잡는 문제 방지.
+          // - 기존 "최저값에 즉시 고정" 로직은 모바일에서 바닥이 너무 낮게 박혀
+          //   임계값이 절대 하한(0.008)에 갇히는 문제가 있어 제거.
+          if (!vadSpeaking) {
+            noiseFloor = noiseFloor * 0.95 + rms * 0.05;
           }
-          const dynamicThreshold = Math.max(0.008, noiseFloor * 2.0);
-          
-          handleVad(rms, dynamicThreshold);
+          if (noiseFloor < NOISE_MIN) noiseFloor = NOISE_MIN;
+
+          // 히스테리시스: 시작 임계는 높게, 유지 임계는 낮게.
+          const startThr = Math.max(VAD_START_MIN, noiseFloor * VAD_START_MULT);
+          const stopThr = Math.max(VAD_STOP_MIN, noiseFloor * VAD_STOP_MULT);
+
+          handleVad(rms, startThr, stopThr);
 
           if (sending) {
             if (preRollBuffer.length > 0) {
@@ -727,17 +743,19 @@
     }
 
     function wireButton(btn, speaker) {
-      btn.addEventListener("click", (e) => {
+      // touch-action:none 버튼에서 모바일 click 이벤트가 누락되는 문제를 피하기 위해
+      // click 대신 pointerdown 으로 즉시 반응하는 토글 PTT 를 구현한다.
+      btn.addEventListener("pointerdown", (e) => {
         e.preventDefault();
-        
+
         if (handsfreeToggle.checked) {
-          // 핸즈프리 모드일 때는 탭 시 해당 화자로 수동 강제 대기 전환
+          // 핸즈프리 모드일 때는 탭 시 해당 화자로 수동 강제 대기 전환(rearm)
           lastActiveSpeaker = speaker;
           rearmHandsfreeSpeaker();
           return;
         }
 
-        // 1회 탭 토글식 PTT 제어
+        // 1회 탭(pointerdown) 토글식 PTT 제어
         if (sending && currentSpeaker === speaker) {
           // 말하고 있던 사람이 다시 탭하면 즉시 전송 종료
           endTalk(btn);
@@ -814,7 +832,7 @@
         lastActiveSpeaker = "host";
         rearmHandsfreeSpeaker();
       } else {
-        usageHint.innerHTML = "버튼을 <b>한 번 터치</b>하면 말하기 시작, <b>다시 터치</b>하면 정송이 멈춥니다.";
+        usageHint.innerHTML = "버튼을 <b>한 번 터치</b>하면 말하기 시작, <b>다시 터치</b>하면 전송이 멈춥니다.";
         if (vadSilenceTimer) {
           clearTimeout(vadSilenceTimer);
           vadSilenceTimer = null;
