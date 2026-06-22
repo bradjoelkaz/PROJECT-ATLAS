@@ -219,6 +219,179 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         except Exception:
             pass
 
+# ============================================================================
+# 2-Device 통화방(Room) 모드 — 탑승 전 기사/승객이 각자 폰으로 통화
+# ============================================================================
+# 기존 단일기기 /ws 는 그대로 유지(하위 호환). 통화방은 /ws/call 로 분리한다.
+#
+# 오디오 흐름(크로스):
+#   driver(한국어) 입력 → 세션(target=GUEST) → 번역(외국어) → passenger 스피커
+#   passenger(외국어) 입력 → 세션(target=HOST)  → 번역(한국어) → driver 스피커
+# 두 폰은 각각 한 사람만 담고 언어가 고정이므로 화자분리 문제가 없다.
+
+active_rooms = {}
+rooms_lock = asyncio.Lock()
+
+
+class CallRoom:
+    """한 통화방의 두 참가자(driver/passenger)와 Gemini 세션 2개를 관리한다."""
+
+    def __init__(self, room_id: str):
+        self.room_id = room_id
+        self.client = genai.Client(api_key=API_KEY)
+        self.ws = {"driver": None, "passenger": None}      # 역할별 클라이언트 WebSocket
+        self.in_q = {"driver": asyncio.Queue(), "passenger": asyncio.Queue()}  # 역할별 입력 오디오 큐
+        self.task = None
+        self.started = False
+
+    async def send_to(self, role: str, payload: dict) -> None:
+        ws = self.ws.get(role)
+        if ws is None:
+            return
+        try:
+            await ws.send_text(json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            pass
+
+    async def broadcast_presence(self) -> None:
+        for role in ("driver", "passenger"):
+            await self.send_to(role, {
+                "type": "presence",
+                "driver": self.ws["driver"] is not None,
+                "passenger": self.ws["passenger"] is not None,
+                "you": role,
+            })
+
+    async def ensure_started(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        # driver(한국어) → 외국어로 번역 → passenger 가 들음
+        cfg_driver = build_config(GUEST_LANGUAGE)
+        # passenger(외국어) → 한국어로 번역 → driver 가 들음
+        cfg_passenger = build_config(HOST_LANGUAGE)
+        try:
+            async with (
+                self.client.aio.live.connect(model=MODEL, config=cfg_driver) as sess_driver,
+                self.client.aio.live.connect(model=MODEL, config=cfg_passenger) as sess_passenger,
+            ):
+                await self.broadcast_presence()
+
+                async def feed(session, role):
+                    """해당 역할의 입력 큐에서 오디오를 꺼내 세션으로 흘려보낸다."""
+                    q = self.in_q[role]
+                    while True:
+                        kind, data = await q.get()
+                        if kind == "audio":
+                            await session.send_realtime_input(
+                                audio=types.Blob(data=data, mime_type=INPUT_MIME))
+                        elif kind == "audio_end":
+                            await session.send_realtime_input(audio_stream_end=True)
+
+                async def pump(session, speaker_role, listener_role):
+                    """세션 출력을 라우팅: 원문 자막→발화자, 번역 자막/음성→상대방."""
+                    async for response in session.receive():
+                        sc = response.server_content
+                        if sc is None:
+                            continue
+                        if sc.input_transcription and sc.input_transcription.text:
+                            await self.send_to(speaker_role, {
+                                "type": "input_transcript",
+                                "text": sc.input_transcription.text})
+                        if sc.output_transcription and sc.output_transcription.text:
+                            await self.send_to(listener_role, {
+                                "type": "output_transcript",
+                                "text": sc.output_transcription.text})
+                        mt = sc.model_turn
+                        if mt and mt.parts:
+                            for part in mt.parts:
+                                inline = getattr(part, "inline_data", None)
+                                if inline and inline.data:
+                                    await self.send_to(listener_role, {
+                                        "type": "audio",
+                                        "data": base64.b64encode(inline.data).decode("ascii")})
+                        if sc.turn_complete:
+                            await self.send_to(listener_role, {"type": "turn_complete"})
+
+                await asyncio.gather(
+                    feed(sess_driver, "driver"),
+                    feed(sess_passenger, "passenger"),
+                    pump(sess_driver, "driver", "passenger"),     # 기사 발화 → 승객이 들음
+                    pump(sess_passenger, "passenger", "driver"),  # 승객 발화 → 기사가 들음
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            for role in ("driver", "passenger"):
+                await self.send_to(role, {"type": "error", "text": f"{type(exc).__name__}: {exc}"})
+        finally:
+            self.started = False
+
+
+async def get_room(room_id: str) -> CallRoom:
+    async with rooms_lock:
+        room = active_rooms.get(room_id)
+        if room is None:
+            room = CallRoom(room_id)
+            active_rooms[room_id] = room
+        return room
+
+
+@app.websocket("/ws/call")
+async def ws_call(websocket: WebSocket) -> None:
+    """2-Device 통화방. 쿼리: ?room=<방번호>&role=driver|passenger"""
+    await websocket.accept()
+
+    if not API_KEY:
+        await websocket.send_text(json.dumps({
+            "type": "error", "text": "GEMINI_API_KEY 가 설정되지 않았습니다."}))
+        await websocket.close()
+        return
+
+    room_id = (websocket.query_params.get("room") or "").strip() or "default"
+    role = (websocket.query_params.get("role") or "").strip()
+    if role not in ("driver", "passenger"):
+        await websocket.send_text(json.dumps({
+            "type": "error", "text": "role 은 driver 또는 passenger 여야 합니다."}))
+        await websocket.close()
+        return
+
+    room = await get_room(room_id)
+    room.ws[role] = websocket
+    await room.ensure_started()
+    await room.send_to(role, {
+        "type": "status", "text": "통화방 입장",
+        "guest_language": GUEST_LANGUAGE, "host_language": HOST_LANGUAGE, "role": role,
+    })
+    await room.broadcast_presence()
+
+    try:
+        while True:
+            msg = json.loads(await websocket.receive_text())
+            mtype = msg.get("type")
+            if mtype == "audio":
+                await room.in_q[role].put(("audio", base64.b64decode(msg["data"])))
+            elif mtype == "audio_end":
+                await room.in_q[role].put(("audio_end", None))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if room.ws.get(role) is websocket:
+            room.ws[role] = None
+        await room.broadcast_presence()
+        # 두 참가자 모두 나가면 방과 세션을 정리한다.
+        async with rooms_lock:
+            if room.ws["driver"] is None and room.ws["passenger"] is None:
+                if room.task:
+                    room.task.cancel()
+                active_rooms.pop(room_id, None)
+
+
 # 정적 프론트엔드 서빙 (반드시 /ws 라우트 정의 이후에 마운트).
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
 

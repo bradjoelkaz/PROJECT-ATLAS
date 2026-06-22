@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Project Atlas - 통화 번역</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --host:#2563eb; --guest:#16a34a; --muted:#8a93a3; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:var(--bg); color:#e8ebf0; min-height:100vh; display:flex; flex-direction:column; align-items:center; }
+    header { width:100%; max-width:520px; padding:16px 16px 8px; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    .status { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+    .dot { width:9px; height:9px; border-radius:50%; background:#555; display:inline-block; }
+    .dot.on { background:#16a34a; } .dot.err { background:#dc2626; }
+    main { width:100%; max-width:520px; padding:8px 16px 90px; flex:1; display:flex; flex-direction:column; gap:14px; }
+
+    .entry { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:14px; }
+    .entry label { font-size:13px; color:var(--muted); }
+    .entry input { width:100%; padding:13px; font-size:16px; border-radius:10px; border:1px solid var(--line); background:#0f1115; color:#fff; }
+    .role-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .role-btn { padding:18px 10px; border-radius:12px; border:2px solid var(--line); background:#0f1115; color:#e8ebf0; font-size:15px; font-weight:700; cursor:pointer; }
+    .role-btn.sel.driver { border-color:var(--host); background:rgba(37,99,235,.18); }
+    .role-btn.sel.guest { border-color:var(--guest); background:rgba(22,163,74,.18); }
+    .primary { width:100%; padding:16px; font-size:17px; font-weight:700; border:none; border-radius:14px; background:#3b82f6; color:#fff; cursor:pointer; }
+    .primary:disabled { opacity:.4; }
+
+    .hidden { display:none !important; }
+    .presence { display:flex; gap:10px; justify-content:center; font-size:13px; }
+    .pill { padding:5px 12px; border-radius:999px; background:#23262e; color:var(--muted); border:1px solid var(--line); }
+    .pill.live { background:#16331f; color:#34d399; border-color:#1f5132; }
+
+    .meter-wrap { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; }
+    .meter-bar-bg { height:8px; background:#23262e; border-radius:999px; overflow:hidden; }
+    .meter-bar { height:100%; width:0%; background:linear-gradient(90deg,#22c55e,#eab308,#ef4444); transition:width .05s; }
+    .meter-label { font-size:12px; color:var(--muted); margin-top:6px; display:block; }
+
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
+    .card.active-mine { border-color:var(--host); }
+    .card.active-other { border-color:var(--guest); }
+    .card-label { font-size:12px; color:var(--muted); margin-bottom:6px; }
+    .card-text { font-size:18px; line-height:1.4; min-height:28px; }
+
+    .footer { font-size:11px; color:var(--muted); text-align:center; padding:14px 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📞 Project Atlas — 통화 번역</h1>
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">방 정보를 입력하세요</span></div>
+  </header>
+
+  <main>
+    <!-- 입장 화면 -->
+    <div class="entry" id="entryPanel">
+      <div>
+        <label>방 번호 (둘이 같은 번호로 입장)</label>
+        <input id="roomInput" inputmode="numeric" placeholder="예: 1234" />
+      </div>
+      <div>
+        <label>내 역할</label>
+        <div class="role-grid">
+          <button class="role-btn driver" id="roleDriver">🇰🇷 기사<br><small>한국어로 말함</small></button>
+          <button class="role-btn guest" id="rolePassenger">🌐 승객<br><small>외국어로 말함</small></button>
+        </div>
+      </div>
+      <button class="primary" id="joinBtn" disabled>🎤 통화 입장 (마이크 허용)</button>
+    </div>
+
+    <!-- 통화 화면 -->
+    <div class="hidden" id="callPanel">
+      <div class="presence">
+        <span class="pill" id="pillDriver">🇰🇷 기사</span>
+        <span class="pill" id="pillPassenger">🌐 승객</span>
+      </div>
+
+      <div class="meter-wrap">
+        <div class="meter-bar-bg"><div class="meter-bar" id="vadMeterBar"></div></div>
+        <span class="meter-label" id="vadMeterLabel">마이크 대기</span>
+      </div>
+
+      <div class="card" id="mineCard">
+        <div class="card-label" id="mineLabel">내가 한 말</div>
+        <div class="card-text" id="mineText">…</div>
+      </div>
+      <div class="card" id="otherCard">
+        <div class="card-label" id="otherLabel">상대 말 (번역됨)</div>
+        <div class="card-text" id="otherText">…</div>
+      </div>
+    </div>
+  </main>
+
+  <div class="footer">번역: Gemini Live · 양방향 통화 · 입력 16kHz / 출력 24kHz PCM</div>
+
+  <script>
+    window.onerror = function(msg, url, line) { alert("에러: " + msg + "\n줄: " + line); return false; };
+
+    const INPUT_RATE = 16000, OUTPUT_RATE = 24000;
+
+    // VAD 튜닝 (index.html 과 동일한 검증된 값)
+    const NOISE_MIN = 0.001, VAD_START_MULT = 2.2, VAD_START_MIN = 0.0055;
+    const VAD_STOP_MULT = 1.4, VAD_STOP_MIN = 0.0035, VAD_SILENCE_LIMIT = 25;
+
+    let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
+    let sending=false, playHead=0, playingUntil=0;
+    let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
+    let myRole=null, roomId=null;
+
+    const $ = (id) => document.getElementById(id);
+    const dot=$("dot"), statusText=$("statusText");
+    const entryPanel=$("entryPanel"), callPanel=$("callPanel");
+    const roomInput=$("roomInput"), roleDriver=$("roleDriver"), rolePassenger=$("rolePassenger"), joinBtn=$("joinBtn");
+    const pillDriver=$("pillDriver"), pillPassenger=$("pillPassenger");
+    const vadMeterBar=$("vadMeterBar"), vadMeterLabel=$("vadMeterLabel");
+    const mineCard=$("mineCard"), mineText=$("mineText"), mineLabel=$("mineLabel");
+    const otherCard=$("otherCard"), otherText=$("otherText"), otherLabel=$("otherLabel");
+
+    function setStatus(t,k){ statusText.textContent=t; dot.className="dot"+(k==="on"?" on":k==="err"?" err":""); }
+
+    // ── 인앱 브라우저 경고 ──
+    (function(){
+      const ua=navigator.userAgent||"";
+      if(!/KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|FB_IAB|Line\/|DaumApps|; wv\)/i.test(ua)) return;
+      const w=document.createElement("div");
+      w.style.cssText="position:fixed;top:0;left:0;right:0;z-index:10000;background:#dc2626;color:#fff;padding:11px 12px;font-size:13px;line-height:1.45;text-align:center;";
+      w.innerHTML="⚠️ <b>인앱 브라우저에선 마이크가 안 됩니다.</b><br>메뉴(⋮)→'다른 브라우저로 열기'로 Chrome/Safari에서 여세요.";
+      document.body.appendChild(w); document.body.style.paddingTop="62px";
+    })();
+
+    // ── 디버그 오버레이 ──
+    const dbg=document.createElement("div");
+    dbg.style.cssText="position:fixed;bottom:4px;left:4px;right:4px;z-index:9999;font:11px/1.45 monospace;color:#3ad13a;background:rgba(0,0,0,.72);padding:5px 7px;border-radius:6px;white-space:pre-wrap;pointer-events:none;";
+    dbg.textContent="debug: 대기"; document.body.appendChild(dbg);
+    let dbgFrames=0;
+    function updateDebug(rms,startThr){
+      dbgFrames++; if(dbgFrames%3!==0) return;
+      dbg.textContent=`ws=${ws?ws.readyState:"-"} 역할=${myRole||"-"} 전송=${sending?1:0} 발화=${vadSpeaking?1:0} 재생중=${(outputCtx&&outputCtx.currentTime<playingUntil)?1:0}\n`+
+        `rms=${rms.toFixed(4)} 소음바닥=${noiseFloor.toFixed(4)} 시작임계=${startThr.toFixed(4)} f=${dbgFrames}`;
+    }
+
+    // ── 입장 폼 ──
+    function refreshJoin(){ joinBtn.disabled = !(roomInput.value.trim() && myRole); }
+    roleDriver.addEventListener("click",()=>{ myRole="driver"; roleDriver.classList.add("sel"); rolePassenger.classList.remove("sel"); refreshJoin(); });
+    rolePassenger.addEventListener("click",()=>{ myRole="passenger"; rolePassenger.classList.add("sel"); roleDriver.classList.remove("sel"); refreshJoin(); });
+    roomInput.addEventListener("input", refreshJoin);
+
+    // URL 파라미터 자동 입장 (?room=1234&role=driver)
+    (function(){
+      const p=new URLSearchParams(location.search);
+      const r=p.get("room"), role=p.get("role");
+      if(r){ roomInput.value=r; }
+      if(role==="driver"){ roleDriver.click(); } else if(role==="passenger"){ rolePassenger.click(); }
+      refreshJoin();
+    })();
+
+    joinBtn.addEventListener("click", join);
+
+    async function join(){
+      joinBtn.disabled=true;
+      roomId=roomInput.value.trim();
+      try{
+        inputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:INPUT_RATE});
+        outputCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:OUTPUT_RATE});
+        if(inputCtx.state==="suspended") await inputCtx.resume();
+        if(outputCtx.state==="suspended") await outputCtx.resume();
+
+        micStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+        await inputCtx.audioWorklet.addModule("pcm-processor.js");
+        const source=inputCtx.createMediaStreamSource(micStream);
+        const hp=inputCtx.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=150;
+        const lp=inputCtx.createBiquadFilter(); lp.type="lowpass"; lp.frequency.value=3000;
+        workletNode=new AudioWorkletNode(inputCtx,"pcm-processor");
+        workletNode.port.onmessage=onAudioFrame;
+        source.connect(hp).connect(lp).connect(workletNode);
+        const silent=inputCtx.createGain(); silent.gain.value=0;
+        workletNode.connect(silent).connect(inputCtx.destination);
+
+        // 역할별 라벨
+        if(myRole==="driver"){ mineLabel.textContent="내가 한 말 (한국어)"; otherLabel.textContent="승객 말 (한국어로 번역됨)"; }
+        else { mineLabel.textContent="내가 한 말 (외국어)"; otherLabel.textContent="기사 말 (외국어로 번역됨)"; }
+
+        connectWs();
+        entryPanel.classList.add("hidden"); callPanel.classList.remove("hidden");
+      }catch(err){ setStatus("마이크 실패: "+err.message,"err"); joinBtn.disabled=false; }
+    }
+
+    function connectWs(){
+      const proto=location.protocol==="https:"?"wss":"ws";
+      ws=new WebSocket(`${proto}://${location.host}/ws/call?room=${encodeURIComponent(roomId)}&role=${myRole}`);
+      ws.onopen=()=>setStatus("방 "+roomId+" 입장됨 — 상대 대기","on");
+      ws.onclose=()=>setStatus("연결 종료","err");
+      ws.onerror=()=>setStatus("연결 오류","err");
+      ws.onmessage=(ev)=>{
+        const m=JSON.parse(ev.data);
+        switch(m.type){
+          case "presence":
+            pillDriver.classList.toggle("live", m.driver);
+            pillPassenger.classList.toggle("live", m.passenger);
+            pillDriver.textContent = "🇰🇷 기사" + (m.driver?" ●":"");
+            pillPassenger.textContent = "🌐 승객" + (m.passenger?" ●":"");
+            const otherIn = (myRole==="driver") ? m.passenger : m.driver;
+            setStatus(otherIn ? "통화 중 — 말해보세요" : "상대 입장 대기 중…", otherIn?"on":null);
+            break;
+          case "input_transcript": mineText.textContent=m.text; break;
+          case "output_transcript": otherText.textContent=m.text; break;
+          case "audio": playPcm(base64ToBuf(m.data)); break;
+          case "error": setStatus("오류: "+m.text,"err"); break;
+        }
+      };
+    }
+
+    // ── 오디오 프레임 처리 + VAD ──
+    function onAudioFrame(e){
+      const int16=new Int16Array(e.data);
+      let sumSq=0; for(let i=0;i<int16.length;i++){ const v=int16[i]/0x8000; sumSq+=v*v; }
+      const rms=Math.sqrt(sumSq/int16.length);
+
+      if(!vadSpeaking){ noiseFloor=noiseFloor*0.95+rms*0.05; }
+      if(noiseFloor<NOISE_MIN) noiseFloor=NOISE_MIN;
+      const startThr=Math.max(VAD_START_MIN, noiseFloor*VAD_START_MULT);
+      const stopThr=Math.max(VAD_STOP_MIN, noiseFloor*VAD_STOP_MULT);
+
+      updateDebug(rms,startThr);
+      handleVad(rms,startThr,stopThr);
+
+      if(sending){
+        while(preRollBuffer.length>0){
+          const old=preRollBuffer.shift();
+          if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({type:"audio",data:bufToBase64(old)}));
+        }
+        if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({type:"audio",data:bufToBase64(e.data)}));
+      }else{
+        preRollBuffer.push(e.data); if(preRollBuffer.length>3) preRollBuffer.shift();
+      }
+    }
+
+    function handleVad(rms,startThr,stopThr){
+      const pct=Math.min(100,Math.round((rms/0.08)*100));
+      vadMeterBar.style.width=pct+"%";
+
+      // 에코 방지: 상대 번역 음성이 스피커로 재생되는 동안에는 새 발화 시작을 막는다.
+      const speakerBusy = outputCtx && outputCtx.currentTime < playingUntil;
+
+      const isVoice = vadSpeaking ? (rms>stopThr) : (rms>startThr && !speakerBusy);
+
+      if(isVoice){
+        vadSilenceFrames=0;
+        vadMeterLabel.textContent="🎙️ 내 음성 전송 중";
+        vadMeterLabel.style.color="#34d399";
+        if(!vadSpeaking){ vadSpeaking=true; sending=true; mineText.textContent="말씀하시는 중…"; }
+      }else{
+        if(vadSpeaking){
+          vadSilenceFrames++;
+          const left=Math.max(0,(VAD_SILENCE_LIMIT-vadSilenceFrames)*0.04).toFixed(1);
+          vadMeterLabel.textContent=`침묵 (${left}초 후 전송 종료)`;
+          vadMeterLabel.style.color="#f59e0b";
+          if(vadSilenceFrames>=VAD_SILENCE_LIMIT){
+            vadSpeaking=false; sending=false; vadSilenceFrames=0;
+            if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({type:"audio_end"}));
+          }
+        }else{
+          vadMeterLabel.textContent = speakerBusy ? "🔊 상대 말 재생 중" : "소리 대기";
+          vadMeterLabel.style.color="var(--muted)";
+        }
+      }
+    }
+
+    // ── base64 / 재생 ──
+    function bufToBase64(buf){ const b=new Uint8Array(buf); let s=""; const C=0x8000;
+      for(let i=0;i<b.length;i+=C) s+=String.fromCharCode.apply(null,b.subarray(i,i+C)); return btoa(s); }
+    function base64ToBuf(b64){ const bin=atob(b64); const b=new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) b[i]=bin.charCodeAt(i); return b.buffer; }
+
+    function playPcm(buf){
+      if(!outputCtx) return;
+      const int16=new Int16Array(buf); const f32=new Float32Array(int16.length);
+      for(let i=0;i<int16.length;i++) f32[i]=int16[i]/0x8000;
+      const ab=outputCtx.createBuffer(1,f32.length,OUTPUT_RATE); ab.getChannelData(0).set(f32);
+      const src=outputCtx.createBufferSource(); src.buffer=ab; src.connect(outputCtx.destination);
+      const PLAYBACK_LEAD=0.12, now=outputCtx.currentTime;
+      if(playHead<now+0.02) playHead=now+PLAYBACK_LEAD;
+      src.start(playHead); playHead+=ab.duration; playingUntil=playHead;
+    }
+  </script>
+</body>
+</html>
