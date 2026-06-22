@@ -621,7 +621,14 @@
       const proto = location.protocol === "https:" ? "wss" : "ws";
       ws = new WebSocket(`${proto}://${location.host}/ws?guest_lang=${encodeURIComponent(guestLang)}`);
 
-      ws.onopen = () => setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
+      ws.onopen = () => {
+        setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
+        // 언어 변경 등으로 재연결되었을 때, 현재 선택된 활성 화자 상태를 백엔드에 즉시 동기화합니다.
+        const activeSpeaker = handsfreeToggle.checked ? lastActiveSpeaker : currentSpeaker;
+        if (activeSpeaker && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "active", speaker: activeSpeaker }));
+        }
+      };
       ws.onclose = () => setStatus("연결 종료됨", "err");
       ws.onerror = () => setStatus("연결 오류", "err");
 
