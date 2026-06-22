@@ -187,6 +187,15 @@
 
     .bubble-original { font-size: 13px; color: #9ca3af; border-bottom: 1px dashed rgba(255, 255, 255, 0.1); padding-bottom: 6px; }
     .bubble-translated { font-weight: 700; font-size: 15px; color: var(--text); }
+
+    /* 라이브 자막: 원문 + 번역 함께 표시 */
+    .line-orig { font-size: 14px; color: #9ca3af; }
+    .line-trans { font-size: 17px; font-weight: 700; color: var(--text); margin-top: 4px; }
+    /* 승객 언어 선택 */
+    .lang-row { display:flex; align-items:center; justify-content:space-between; gap:10px;
+      background:var(--card); border:1px solid var(--line); border-radius:12px; padding:10px 14px; }
+    .lang-row select { background:#0f1115; color:#fff; border:1px solid var(--line);
+      border-radius:8px; padding:8px 10px; font-size:15px; }
     
     /* 다시 듣기 버튼 */
     .replay-btn {
@@ -218,6 +227,15 @@
 
   <main>
     <button id="startBtn">🎤 시작하기 (마이크 권한 허용)</button>
+
+    <div class="lang-row">
+      <span>🌐 승객 언어</span>
+      <select id="langSelect">
+        <option value="ja">일본어 (日本語)</option>
+        <option value="zh-Hans">중국어 (中文)</option>
+        <option value="en">영어 (English)</option>
+      </select>
+    </div>
 
     <div class="talk-grid">
       <button id="guestBtn" class="talk guest" aria-disabled="true">
@@ -276,6 +294,7 @@
 
   <div class="footer">번역: Gemini Live (gemini-3.5-live-translate-preview) · 입력 16kHz / 출력 24kHz PCM</div>
 
+  <script src="audio-streamer.js"></script>
   <script>
     // 모바일 폰 런타임 디버깅용 에러 포착 핸들러
     window.onerror = function(msg, url, line) {
@@ -293,14 +312,20 @@
     let micStream = null;
     let sending = false;
     let playHead = 0;
+    let playingUntil = 0;
+    let lastAudioAt = 0;
+    let playerNode = null;
+    let streamer = null;
 
     let dialogueHistory = [];
     let currentAudioChunks = [];
     let currentSpeaker = null;
     let currentHostInput = "";
-    let currentHostOutput = "";
+    let currentHostTrans = "";
     let currentGuestInput = "";
-    let currentGuestOutput = "";
+    let currentGuestTrans = "";
+    let guestLang = "ja";
+    let pendingPlayReset = false;
     let finalizeTimer = null;
     let stopSendingTimer = null;
 
@@ -313,6 +338,13 @@
     let noiseFloor = 0.005; // 대기 소음의 평균 RMS 수준
     let vadSilenceFrames = 0; // 침묵 프레임 개수 누적
     const VAD_SILENCE_LIMIT = 25; // 25프레임 * 40ms = 약 1.0초 침묵 시 턴 종결
+
+    // VAD 감도 튜닝 상수 (모바일의 작은 목소리도 감지되도록 하한을 낮춤)
+    const NOISE_MIN = 0.001;        // 노이즈 플로어 최소값(0 방지)
+    const VAD_START_MULT = 2.2;     // 발화 시작 임계 = 노이즈플로어 * 이 값
+    const VAD_START_MIN = 0.0055;   // 발화 시작 임계 절대 하한 (기존 0.008 → 낮춤)
+    const VAD_STOP_MULT = 1.4;      // 발화 유지 임계 = 노이즈플로어 * 이 값 (히스테리시스)
+    const VAD_STOP_MIN = 0.0035;    // 발화 유지 임계 절대 하한
 
     const dot = document.getElementById("dot");
     const statusText = document.getElementById("statusText");
@@ -330,12 +362,69 @@
     const historyCloseBtn = document.getElementById("historyCloseBtn");
     const historyChatFeed = document.getElementById("historyChatFeed");
     const historyCountBadge = document.getElementById("historyCountBadge");
+    const langSelect = document.getElementById("langSelect");
+
+    // HTML 이스케이프 (자막 innerHTML 주입 방지)
+    function escapeHtml(s) {
+      return (s || "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+    }
+    // 라이브 자막: 말한 사람 카드에 원문 + 번역을 함께 표시
+    function renderHostCard() {
+      let h = `<div class="line-orig">${escapeHtml(currentHostInput) || "…"}</div>`;
+      if (currentHostTrans) h += `<div class="line-trans">${escapeHtml(currentHostTrans)}</div>`;
+      liveHostText.innerHTML = h;
+    }
+    function renderGuestCard() {
+      let h = `<div class="line-orig">${escapeHtml(currentGuestInput) || "…"}</div>`;
+      if (currentGuestTrans) h += `<div class="line-trans">${escapeHtml(currentGuestTrans)}</div>`;
+      liveGuestText.innerHTML = h;
+    }
 
     const handsfreeToggle = document.getElementById("handsfreeToggle");
     const vadMeterContainer = document.getElementById("vadMeterContainer");
     const vadMeterBar = document.getElementById("vadMeterBar");
     const vadMeterLabel = document.getElementById("vadMeterLabel");
     const usageHint = document.getElementById("usageHint");
+
+    // ── 인앱 브라우저(카톡/인스타/페북 등) 경고 ──
+    // 인앱 브라우저는 마이크 캡처를 막아 오디오가 전부 무음(rms=0)으로 들어온다.
+    // 링크를 카톡으로 공유해 테스트하므로, 외부 브라우저로 열도록 안내한다.
+    (function warnIfInAppBrowser() {
+      const ua = navigator.userAgent || "";
+      const inApp = /KAKAOTALK|NAVER\(inapp|Instagram|FBAN|FBAV|FB_IAB|Line\/|DaumApps|; wv\)/i.test(ua);
+      if (!inApp) return;
+      const warn = document.createElement("div");
+      warn.style.cssText =
+        "position:fixed;top:0;left:0;right:0;z-index:10000;background:#dc2626;color:#fff;" +
+        "padding:11px 12px;font-size:13px;line-height:1.45;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);";
+      warn.innerHTML =
+        "⚠️ <b>인앱 브라우저(카톡 등)에서는 마이크가 동작하지 않습니다.</b><br>" +
+        "우측 상단 <b>메뉴(⋮) → '다른 브라우저로 열기'</b> 로 <b>Chrome / Safari</b> 에서 열어주세요.";
+      document.body.appendChild(warn);
+      document.body.style.paddingTop = "62px";
+    })();
+
+    let audioChunksCount = 0;
+
+    // ── 화면 디버그 오버레이 (핸즈프리/VAD 진단용) ──
+    // 서버 콘솔을 못 보는 폰에서도 상태를 바로 확인할 수 있도록 화면 하단에 실시간 표시.
+    const dbg = document.createElement("div");
+    dbg.style.cssText =
+      "position:fixed;bottom:4px;left:4px;right:4px;z-index:9999;font:11px/1.45 monospace;" +
+      "color:#3ad13a;background:rgba(0,0,0,.72);padding:5px 7px;border-radius:6px;" +
+      "white-space:pre-wrap;pointer-events:none;";
+    dbg.textContent = "debug: 시작 전 — 🎤 시작하기를 누르세요";
+    document.body.appendChild(dbg);
+    let dbgFrames = 0;
+    function updateDebug(rms, startThr) {
+      dbgFrames++;
+      if (dbgFrames % 3 !== 0) return; // 약 120ms마다 갱신
+      const ctxState = outputCtx ? outputCtx.state : "-";
+      dbg.textContent =
+        `ws=${ws ? ws.readyState : "-"}  핸즈프리=${handsfreeToggle.checked ? "ON" : "off"}  화자=${currentSpeaker || "-"}  전송=${sending ? 1 : 0}  발화=${vadSpeaking ? 1 : 0}\n` +
+        `rms=${rms.toFixed(4)}  소음바닥=${noiseFloor.toFixed(4)}  시작임계=${startThr.toFixed(4)}\n` +
+        `오디오컨텍스트=${ctxState}  수신청크=${audioChunksCount}  재생헤드=${playHead.toFixed(2)}`;
+    }
 
     function setStatus(text, kind) {
       statusText.textContent = text;
@@ -367,22 +456,22 @@
 
       let item = null;
       if (currentSpeaker === "host") {
-        if (currentHostInput || currentHostOutput) {
+        if (currentHostInput || currentHostTrans) {
           item = {
             id: Date.now(),
             speaker: "host",
             original: currentHostInput || "(음성 인식 완료)",
-            translated: currentHostOutput || "",
+            translated: currentHostTrans || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
       } else if (currentSpeaker === "guest") {
-        if (currentGuestInput || currentGuestOutput) {
+        if (currentGuestInput || currentGuestTrans) {
           item = {
             id: Date.now(),
             speaker: "guest",
             original: currentGuestInput || "(음성 인식 완료)",
-            translated: currentGuestOutput || "",
+            translated: currentGuestTrans || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
@@ -400,10 +489,11 @@
 
       currentSpeaker = null;
       currentHostInput = "";
-      currentHostOutput = "";
+      currentHostTrans = "";
       currentGuestInput = "";
-      currentGuestOutput = "";
+      currentGuestTrans = "";
       currentAudioChunks = [];
+      pendingPlayReset = true;
     }
 
     function rearmHandsfreeSpeaker() {
@@ -435,14 +525,14 @@
       }
     }
 
-    function handleVad(rms, threshold) {
+    function handleVad(rms, startThr, stopThr) {
       if (!handsfreeToggle.checked) {
         vadMeterContainer.classList.remove("active");
         return;
       }
 
       vadMeterContainer.classList.add("active");
-      const pct = Math.min(100, Math.round((rms / 0.1) * 100));
+      const pct = Math.min(100, Math.round((rms / 0.08) * 100));
       vadMeterBar.style.width = pct + "%";
 
       if (!currentSpeaker) {
@@ -451,7 +541,10 @@
         return;
       }
 
-      if (rms > threshold) {
+      // 히스테리시스: 아직 말 안 하는 중이면 '시작 임계'를, 말하는 중이면 더 낮은 '유지 임계'를 적용.
+      const isVoice = vadSpeaking ? (rms > stopThr) : (rms > startThr);
+
+      if (isVoice) {
         vadSilenceFrames = 0;
         vadMeterLabel.textContent = "🎙️ 음성 감지 전송";
         vadMeterLabel.style.color = currentSpeaker === "host" ? "#60a5fa" : "#34d399";
@@ -473,7 +566,7 @@
       } else {
         if (vadSpeaking) {
           vadSilenceFrames++;
-          const remainingSec = Math.max(0, ((VAD_SILENCE_LIMIT - vadSilenceFrames) * 0.04).toFixed(1));
+          const remainingSec = Math.max(0, (VAD_SILENCE_LIMIT - vadSilenceFrames) * 0.04).toFixed(1);
           vadMeterLabel.textContent = `침묵 감지 (${remainingSec}초 남음)`;
           vadMeterLabel.style.color = "#f59e0b";
 
@@ -481,7 +574,7 @@
             vadSpeaking = false;
             sending = false;
             vadSilenceFrames = 0;
-            
+
             console.log("Dynamic VAD: Speech Ended");
             if (ws && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: "audio_end" }));
@@ -517,28 +610,16 @@
     }
 
     function playPcm(buf) {
-      if (!outputCtx) return;
-      const int16 = new Int16Array(buf);
-      const f32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
-
-      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
-      audioBuf.getChannelData(0).set(f32);
-      const src = outputCtx.createBufferSource();
-      src.buffer = audioBuf;
-      src.connect(outputCtx.destination);
-
-      const now = outputCtx.currentTime;
-      if (playHead < now || (playHead - now) > 0.15) {
-        playHead = now;
-      }
-      src.start(playHead);
-      playHead += audioBuf.duration;
+      if (!streamer) return;
+      if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
+      audioChunksCount++;
+      // 연속 재생 엔진으로 전달 (큐잉 + 시간축 스케줄링으로 끊김/지지직 방지)
+      streamer.addPCM16(new Uint8Array(buf));
     }
 
     function connectWs() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws = new WebSocket(`${proto}://${location.host}/ws?guest_lang=${encodeURIComponent(guestLang)}`);
 
       ws.onopen = () => setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
       ws.onclose = () => setStatus("연결 종료됨", "err");
@@ -555,22 +636,12 @@
             setStatus("세션 연결됨 — 말해보세요", "on");
             break;
           case "input_transcript":
-            if (msg.direction === "to_guest") {
-              currentHostInput = msg.text;
-              liveHostText.textContent = currentHostInput;
-            } else if (msg.direction === "to_host") {
-              currentGuestInput = msg.text;
-              liveGuestText.textContent = currentGuestInput;
-            }
+            if (msg.direction === "to_guest") { currentHostInput += msg.text; renderHostCard(); }
+            else if (msg.direction === "to_host") { currentGuestInput += msg.text; renderGuestCard(); }
             break;
           case "output_transcript":
-            if (msg.direction === "to_guest") {
-              currentGuestOutput = msg.text;
-              liveGuestText.textContent = currentGuestOutput;
-            } else if (msg.direction === "to_host") {
-              currentHostOutput = msg.text;
-              liveHostText.textContent = currentHostOutput;
-            }
+            if (msg.direction === "to_guest") { currentHostTrans += msg.text; renderHostCard(); }
+            else if (msg.direction === "to_host") { currentGuestTrans += msg.text; renderGuestCard(); }
             break;
           case "audio":
             const chunk = base64ToBuf(msg.data);
@@ -605,7 +676,7 @@
         if (outputCtx.state === "suspended") await outputCtx.resume();
 
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
 
         await inputCtx.audioWorklet.addModule("pcm-processor.js");
@@ -630,16 +701,23 @@
             sumSq += val * val;
           }
           const rms = Math.sqrt(sumSq / int16.length);
-          
-          // 동적 소음 측정 (Adaptive Noise Floor)
-          if (rms < noiseFloor) {
-            noiseFloor = rms;
-          } else {
-            noiseFloor = noiseFloor * 0.999 + rms * 0.001;
+
+          // 적응형 소음 바닥(Adaptive Noise Floor)
+          // - 말하는 중(vadSpeaking)이 아닐 때만 주변 소음에 천천히 적응시킨다.
+          //   → 큰 목소리에 바닥이 끌려 올라가 다음 발화를 못 잡는 문제 방지.
+          // - 기존 "최저값에 즉시 고정" 로직은 모바일에서 바닥이 너무 낮게 박혀
+          //   임계값이 절대 하한(0.008)에 갇히는 문제가 있어 제거.
+          if (!vadSpeaking) {
+            noiseFloor = noiseFloor * 0.95 + rms * 0.05;
           }
-          const dynamicThreshold = Math.max(0.008, noiseFloor * 2.0);
-          
-          handleVad(rms, dynamicThreshold);
+          if (noiseFloor < NOISE_MIN) noiseFloor = NOISE_MIN;
+
+          // 히스테리시스: 시작 임계는 높게, 유지 임계는 낮게.
+          const startThr = Math.max(VAD_START_MIN, noiseFloor * VAD_START_MULT);
+          const stopThr = Math.max(VAD_STOP_MIN, noiseFloor * VAD_STOP_MULT);
+
+          updateDebug(rms, startThr);
+          handleVad(rms, startThr, stopThr);
 
           if (sending) {
             if (preRollBuffer.length > 0) {
@@ -668,6 +746,9 @@
         silent.gain.value = 0;
         workletNode.connect(silent).connect(inputCtx.destination);
 
+        // 검증된 연속 재생 엔진(구글 audio-streamer 패턴) 초기화
+        streamer = new AudioStreamer(outputCtx);
+
         connectWs();
 
         guestBtn.removeAttribute("aria-disabled");
@@ -685,12 +766,25 @@
       if (finalizeTimer) finalizeTurn();
       if (stopSendingTimer) { clearTimeout(stopSendingTimer); stopSendingTimer = null; }
 
+      // 화자 전환 시: 이전 화자가 아직 전송 중이면 그 세션을 즉시 종료(audio_end).
+      // (backend state[active]가 아직 이전 화자이므로 audio_end 가 이전 세션으로 감)
+      // 이걸 안 하면 이전 세션이 매달려 번역이 늦게/꼬여서 나온다.
+      if (sending && currentSpeaker && currentSpeaker !== speaker &&
+          ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "audio_end" }));
+      }
+
       if (inputCtx && inputCtx.state === "suspended") inputCtx.resume();
       if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
       
       sending = true;
       currentSpeaker = speaker;
       btn.classList.add("active");
+
+      // 새 턴 시작: 해당 화자의 자막 누적 초기화 + 다음 재생은 새 턴으로 리셋
+      pendingPlayReset = true;
+      if (speaker === "host") { currentHostInput = ""; currentHostTrans = ""; }
+      else { currentGuestInput = ""; currentGuestTrans = ""; }
 
       if (speaker === "host") {
         liveHostCard.className = "subtitle-card highlight-host active-input";
@@ -723,21 +817,23 @@
           console.log("Safeguard timeout fired - finalizing turn");
           finalizeTurn();
         }, 8000);
-      }, 450);
+      }, 200);
     }
 
     function wireButton(btn, speaker) {
-      btn.addEventListener("click", (e) => {
+      // touch-action:none 버튼에서 모바일 click 이벤트가 누락되는 문제를 피하기 위해
+      // click 대신 pointerdown 으로 즉시 반응하는 토글 PTT 를 구현한다.
+      btn.addEventListener("pointerdown", (e) => {
         e.preventDefault();
-        
+
         if (handsfreeToggle.checked) {
-          // 핸즈프리 모드일 때는 탭 시 해당 화자로 수동 강제 대기 전환
+          // 핸즈프리 모드일 때는 탭 시 해당 화자로 수동 강제 대기 전환(rearm)
           lastActiveSpeaker = speaker;
           rearmHandsfreeSpeaker();
           return;
         }
 
-        // 1회 탭 토글식 PTT 제어
+        // 1회 탭(pointerdown) 토글식 PTT 제어
         if (sending && currentSpeaker === speaker) {
           // 말하고 있던 사람이 다시 탭하면 즉시 전송 종료
           endTalk(btn);
@@ -814,7 +910,7 @@
         lastActiveSpeaker = "host";
         rearmHandsfreeSpeaker();
       } else {
-        usageHint.innerHTML = "버튼을 <b>한 번 터치</b>하면 말하기 시작, <b>다시 터치</b>하면 정송이 멈춥니다.";
+        usageHint.innerHTML = "버튼을 <b>한 번 터치</b>하면 말하기 시작, <b>다시 터치</b>하면 전송이 멈춥니다.";
         if (vadSilenceTimer) {
           clearTimeout(vadSilenceTimer);
           vadSilenceTimer = null;
@@ -829,6 +925,15 @@
     startBtn.addEventListener("click", start);
     wireButton(guestBtn, "guest");
     wireButton(hostBtn, "host");
+
+    // 승객 언어 변경: 이미 연결돼 있으면 새 언어로 세션 재연결
+    langSelect.addEventListener("change", () => {
+      guestLang = langSelect.value;
+      if (inputCtx && ws) {
+        try { ws.close(); } catch (e) {}
+        connectWs();
+      }
+    });
 
     historyOpenBtn.addEventListener("click", openHistoryModal);
     historyCloseBtn.addEventListener("click", closeHistoryModal);
