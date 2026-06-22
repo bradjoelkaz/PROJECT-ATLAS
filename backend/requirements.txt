@@ -1,0 +1,8 @@
+# Gemini Live Translation PoC - 백엔드 의존성
+# google-genai 는 Live Translation(gemini-3.5-live-translate-preview) 을
+# 지원하는 최신 버전이 필요합니다. 설치 후 문제가 있으면 아래 명령으로 업그레이드:
+#   pip install --upgrade google-genai
+google-genai>=1.21.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.1

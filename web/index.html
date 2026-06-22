@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Project Atlas - 양방향 번역 PoC</title>
+  <style>
+    :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --host:#2563eb; --guest:#16a34a; --muted:#8a93a3; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: #e8ebf0; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    header { width: 100%; max-width: 520px; padding: 18px 16px 8px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; display: inline-block; }
+    .dot.on { background: #16a34a; }
+    .dot.err { background: #dc2626; }
+
+    main { width: 100%; max-width: 520px; padding: 8px 16px 24px; flex: 1; display: flex; flex-direction: column; gap: 14px; }
+
+    #startBtn {
+      width: 100%; padding: 16px; font-size: 17px; font-weight: 600; border: none; border-radius: 14px;
+      background: #3b82f6; color: white; cursor: pointer;
+    }
+    #startBtn:disabled { opacity: .4; }
+
+    .talk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .talk {
+      padding: 26px 12px; border-radius: 16px; border: 2px solid var(--line); background: var(--card);
+      color: #e8ebf0; font-size: 16px; font-weight: 700; text-align: center; cursor: pointer;
+      user-select: none; touch-action: none; transition: transform .05s, background .1s;
+    }
+    .talk small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .talk.guest.active { background: var(--guest); border-color: var(--guest); transform: scale(0.98); }
+    .talk.host.active { background: var(--host); border-color: var(--host); transform: scale(0.98); }
+    .talk:disabled, .talk[aria-disabled="true"] { opacity: .35; }
+
+    .hint { font-size: 12px; color: var(--muted); text-align: center; }
+
+    .log { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; min-height: 180px; }
+    .line { padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 15px; line-height: 1.4; }
+    .line:last-child { border-bottom: none; }
+    .line .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; margin-right: 7px; vertical-align: middle; }
+    .tag.in { background: #374151; color: #cbd5e1; }
+    .tag.out-host { background: var(--host); color: white; }
+    .tag.out-guest { background: var(--guest); color: white; }
+    .footer { font-size: 11px; color: var(--muted); text-align: center; padding-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🚕 Project Atlas — 양방향 번역 PoC</h1>
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">대기 중 — 시작하기를 누르세요</span></div>
+  </header>
+
+  <main>
+    <button id="startBtn">🎤 시작하기 (마이크 권한 허용)</button>
+
+    <div class="talk-grid">
+      <button id="guestBtn" class="talk guest" aria-disabled="true">
+        🌐 승객 말하기
+        <small id="guestLabel">외국어 → 한국어</small>
+      </button>
+      <button id="hostBtn" class="talk host" aria-disabled="true">
+        🇰🇷 내가 말하기
+        <small id="hostLabel">한국어 → 외국어</small>
+      </button>
+    </div>
+    <div class="hint">버튼을 <b>누르고 있는 동안</b> 말하세요. 떼면 전송이 멈춥니다.</div>
+
+    <div class="log" id="log"></div>
+  </main>
+
+  <div class="footer">번역: Gemini Live (gemini-3.5-live-translate-preview) · 입력 16kHz / 출력 24kHz PCM</div>
+
+  <script>
+    const INPUT_RATE = 16000;
+    const OUTPUT_RATE = 24000;
+
+    let ws = null;
+    let inputCtx = null;     // 16kHz 마이크 캡처용
+    let outputCtx = null;    // 24kHz 재생용
+    let workletNode = null;
+    let micStream = null;
+    let sending = false;       // 버튼을 누르고 있는 동안만 true
+    let playHead = 0;          // 재생 스케줄 커서
+
+    const dot = document.getElementById("dot");
+    const statusText = document.getElementById("statusText");
+    const startBtn = document.getElementById("startBtn");
+    const guestBtn = document.getElementById("guestBtn");
+    const hostBtn = document.getElementById("hostBtn");
+    const logEl = document.getElementById("log");
+
+    function setStatus(text, kind) {
+      statusText.textContent = text;
+      dot.className = "dot" + (kind === "on" ? " on" : kind === "err" ? " err" : "");
+    }
+
+    function addLine(tagClass, tagText, text) {
+      const line = document.createElement("div");
+      line.className = "line";
+      const tag = document.createElement("span");
+      tag.className = "tag " + tagClass;
+      tag.textContent = tagText;
+      line.appendChild(tag);
+      line.appendChild(document.createTextNode(text));
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ---- 유틸: ArrayBuffer <-> base64 ----
+    function bufToBase64(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    }
+    function base64ToBuf(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    // ---- 번역 오디오 재생 (24kHz PCM16) ----
+    function playPcm(buf) {
+      if (!outputCtx) return;
+      const int16 = new Int16Array(buf);
+      const f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
+
+      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
+      audioBuf.getChannelData(0).set(f32);
+      const src = outputCtx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(outputCtx.destination);
+
+      const now = outputCtx.currentTime;
+      if (playHead < now) playHead = now;
+      src.start(playHead);
+      playHead += audioBuf.duration;
+    }
+
+    // ---- WebSocket ----
+    function connectWs() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
+      ws.onclose = () => setStatus("연결 종료됨", "err");
+      ws.onerror = () => setStatus("연결 오류", "err");
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        switch (msg.type) {
+          case "status":
+            if (msg.guest_language) {
+              guestBtn.querySelector("small").textContent = `${msg.guest_language} → ${msg.host_language}`;
+              hostBtn.querySelector("small").textContent = `${msg.host_language} → ${msg.guest_language}`;
+            }
+            setStatus("세션 연결됨 — 말해보세요", "on");
+            break;
+          case "input_transcript":
+            addLine("in", "원문", msg.text);
+            break;
+          case "output_transcript":
+            addLine(msg.direction === "to_host" ? "out-host" : "out-guest",
+                    msg.direction === "to_host" ? "번역→기사" : "번역→승객", msg.text);
+            break;
+          case "audio":
+            playPcm(base64ToBuf(msg.data));
+            break;
+          case "error":
+            setStatus("오류: " + msg.text, "err");
+            addLine("in", "오류", msg.text);
+            break;
+        }
+      };
+    }
+
+    // ---- 시작: 오디오 초기화 + WS 연결 ----
+    async function start() {
+      startBtn.disabled = true;
+      try {
+        inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: INPUT_RATE });
+        outputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_RATE });
+
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+
+        await inputCtx.audioWorklet.addModule("pcm-processor.js");
+        const source = inputCtx.createMediaStreamSource(micStream);
+        workletNode = new AudioWorkletNode(inputCtx, "pcm-processor");
+        workletNode.port.onmessage = (e) => {
+          if (sending && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "audio", data: bufToBase64(e.data) }));
+          }
+        };
+        source.connect(workletNode);
+        // 워크릿은 출력이 필요 없지만, 일부 브라우저는 destination 연결이 있어야 process 가 돈다.
+        const silent = inputCtx.createGain();
+        silent.gain.value = 0;
+        workletNode.connect(silent).connect(inputCtx.destination);
+
+        connectWs();
+
+        guestBtn.setAttribute("aria-disabled", "false");
+        hostBtn.setAttribute("aria-disabled", "false");
+        startBtn.textContent = "✅ 준비됨";
+      } catch (err) {
+        setStatus("마이크 초기화 실패: " + err.message, "err");
+        startBtn.disabled = false;
+      }
+    }
+
+    // ---- Push-to-talk ----
+    function beginTalk(speaker, btn) {
+      if (btn.getAttribute("aria-disabled") === "true") return;
+      if (inputCtx && inputCtx.state === "suspended") inputCtx.resume();
+      if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
+      sending = true;
+      btn.classList.add("active");
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "active", speaker }));
+      }
+    }
+    function endTalk(btn) {
+      sending = false;
+      btn.classList.remove("active");
+    }
+
+    function wireButton(btn, speaker) {
+      btn.addEventListener("pointerdown", (e) => { e.preventDefault(); beginTalk(speaker, btn); });
+      btn.addEventListener("pointerup", (e) => { e.preventDefault(); endTalk(btn); });
+      btn.addEventListener("pointercancel", () => endTalk(btn));
+      btn.addEventListener("pointerleave", () => { if (sending) endTalk(btn); });
+    }
+
+    startBtn.addEventListener("click", start);
+    wireButton(guestBtn, "guest");
+    wireButton(hostBtn, "host");
+  </script>
+</body>
+</html>
