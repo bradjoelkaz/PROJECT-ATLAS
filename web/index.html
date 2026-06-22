@@ -344,6 +344,24 @@
     const vadMeterLabel = document.getElementById("vadMeterLabel");
     const usageHint = document.getElementById("usageHint");
 
+    // ── 화면 디버그 오버레이 (핸즈프리/VAD 진단용) ──
+    // 서버 콘솔을 못 보는 폰에서도 상태를 바로 확인할 수 있도록 화면 하단에 실시간 표시.
+    const dbg = document.createElement("div");
+    dbg.style.cssText =
+      "position:fixed;bottom:4px;left:4px;right:4px;z-index:9999;font:11px/1.45 monospace;" +
+      "color:#3ad13a;background:rgba(0,0,0,.72);padding:5px 7px;border-radius:6px;" +
+      "white-space:pre-wrap;pointer-events:none;";
+    dbg.textContent = "debug: 시작 전 — 🎤 시작하기를 누르세요";
+    document.body.appendChild(dbg);
+    let dbgFrames = 0;
+    function updateDebug(rms, startThr) {
+      dbgFrames++;
+      if (dbgFrames % 3 !== 0) return; // 약 120ms마다 갱신
+      dbg.textContent =
+        `ws=${ws ? ws.readyState : "-"}  핸즈프리=${handsfreeToggle.checked ? "ON" : "off"}  화자=${currentSpeaker || "-"}  전송=${sending ? 1 : 0}  발화=${vadSpeaking ? 1 : 0}\n` +
+        `rms=${rms.toFixed(4)}  소음바닥=${noiseFloor.toFixed(4)}  시작임계=${startThr.toFixed(4)}  프레임=${dbgFrames}`;
+    }
+
     function setStatus(text, kind) {
       statusText.textContent = text;
       dot.className = "dot" + (kind === "on" ? " on" : kind === "err" ? " err" : "");
@@ -655,6 +673,7 @@
           const startThr = Math.max(VAD_START_MIN, noiseFloor * VAD_START_MULT);
           const stopThr = Math.max(VAD_STOP_MIN, noiseFloor * VAD_STOP_MULT);
 
+          updateDebug(rms, startThr);
           handleVad(rms, startThr, stopThr);
 
           if (sending) {

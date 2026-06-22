@@ -57,24 +57,24 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 
 
-def build_config(target_language_code: str, system_instruction: str = None) -> types.LiveConnectConfig:
-    """주어진 목적지 언어로 번역하는 단방향 세션 설정을 만든다."""
-    config_args = {
-        "response_modalities": ["AUDIO"],
-        "input_audio_transcription": types.AudioTranscriptionConfig(),
-        "output_audio_transcription": types.AudioTranscriptionConfig(),
-        "translation_config": types.TranslationConfig(
+def build_config(target_language_code: str) -> types.LiveConnectConfig:
+    """주어진 목적지 언어로 번역하는 단방향 세션 설정을 만든다.
+
+    주의: gemini-3.5-live-translate-preview 는 '번역 전용' 파이프라인이라
+    system_instruction(시스템 프롬프트)/도구/텍스트 입력을 지원하지 않는다.
+    system_instruction 을 넣으면 세션 setup 단계에서 거부되어 연결이 죽을 수 있으므로
+    translation_config 외의 지시는 절대 넣지 않는다.
+    """
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        translation_config=types.TranslationConfig(
             target_language_code=target_language_code,
             # 입력이 이미 목적지 언어일 때 따라 말하지 않고 침묵.
-            # (버튼으로 화자를 지정하므로 잘못된 언어가 들어올 일이 적지만 안전하게 False)
             echo_target_language=False,
         ),
-    }
-    if system_instruction:
-        config_args["system_instruction"] = types.Content(
-            parts=[types.Part(text=system_instruction)]
-        )
-    return types.LiveConnectConfig(**config_args)
+    )
 
 
 app = FastAPI(title="Project Atlas - 양방향 번역 PoC")
@@ -106,18 +106,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     client = genai.Client(api_key=API_KEY)
 
     # 세션 A: 무엇이든 한국어(HOST)로 번역 → 기사가 들음 (출력 방향: to_host)
-    host_instr = (
-        "You are a professional taxi driver's translator. Translate the passenger's foreign language speech into polite and natural Korean for the Korean driver. "
-        "Keep it concise, simple, and easy for the driver to understand immediately."
-    )
-    cfg_to_host = build_config(HOST_LANGUAGE, system_instruction=host_instr)
-    
+    cfg_to_host = build_config(HOST_LANGUAGE)
+
     # 세션 B: 무엇이든 외국어(GUEST)로 번역 → 승객이 들음 (출력 방향: to_guest)
-    guest_instr = (
-        f"You are a professional translator for a tourist passenger in a taxi. Translate the driver's Korean speech into polite and natural {GUEST_LANGUAGE} for the passenger. "
-        "Keep it friendly and concise so the passenger feels comfortable."
-    )
-    cfg_to_guest = build_config(GUEST_LANGUAGE, system_instruction=guest_instr)
+    cfg_to_guest = build_config(GUEST_LANGUAGE)
 
     # 현재 활성 화자. "guest"=승객(외국어), "host"=기사(한국어). 기본은 승객.
     state = {"active": "guest"}
