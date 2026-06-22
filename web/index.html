@@ -294,6 +294,7 @@
 
   <div class="footer">번역: Gemini Live (gemini-3.5-live-translate-preview) · 입력 16kHz / 출력 24kHz PCM</div>
 
+  <script src="audio-streamer.js"></script>
   <script>
     // 모바일 폰 런타임 디버깅용 에러 포착 핸들러
     window.onerror = function(msg, url, line) {
@@ -314,6 +315,7 @@
     let playingUntil = 0;
     let lastAudioAt = 0;
     let playerNode = null;
+    let streamer = null;
 
     let dialogueHistory = [];
     let currentAudioChunks = [];
@@ -608,34 +610,11 @@
     }
 
     function playPcm(buf) {
-      if (!outputCtx) return;
-      if (outputCtx.state === "suspended") {
-        outputCtx.resume();
-      }
+      if (!streamer) return;
+      if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
       audioChunksCount++;
-      const int16 = new Int16Array(buf);
-      const f32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
-
-      // 처음에 소리가 잘 나오던 방식(createBufferSource)으로 복원.
-      // 컨텍스트가 24kHz라 버퍼 레이트와 일치 → 조각별 리샘플 잡음 없음.
-      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
-      audioBuf.getChannelData(0).set(f32);
-      const src = outputCtx.createBufferSource();
-      src.buffer = audioBuf;
-      src.connect(outputCtx.destination);
-
-      // 재생헤드: 새 턴(pendingPlayReset)이거나 뒤처졌을 때만 리셋.
-      // 턴 내에서는 이어붙여 끊김 없음. (시간간격 기반 리셋은 응답 중 모델이 잠깐 쉬면
-      //  끊김을 유발해서 제거)
-      const now = outputCtx.currentTime;
-      if (pendingPlayReset || playHead < now + 0.02) {
-        playHead = now + 0.08;
-        pendingPlayReset = false;
-      }
-      src.start(playHead);
-      playHead += audioBuf.duration;
-      playingUntil = playHead;
+      // 연속 재생 엔진으로 전달 (큐잉 + 시간축 스케줄링으로 끊김/지지직 방지)
+      streamer.addPCM16(new Uint8Array(buf));
     }
 
     function connectWs() {
@@ -670,7 +649,6 @@
             playPcm(chunk);
             break;
           case "turn_complete":
-            if (playerNode) playerNode.port.postMessage({ cmd: "flush" });
             if (finalizeTimer) {
               clearTimeout(finalizeTimer);
               finalizeTimer = null;
@@ -767,6 +745,9 @@
         const silent = inputCtx.createGain();
         silent.gain.value = 0;
         workletNode.connect(silent).connect(inputCtx.destination);
+
+        // 검증된 연속 재생 엔진(구글 audio-streamer 패턴) 초기화
+        streamer = new AudioStreamer(outputCtx);
 
         connectWs();
 

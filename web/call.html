@@ -101,6 +101,7 @@
 
   <div class="footer">번역: Gemini Live · 양방향 통화 · 입력 16kHz / 출력 24kHz PCM</div>
 
+  <script src="audio-streamer.js"></script>
   <script>
     window.onerror = function(msg, url, line) { alert("에러: " + msg + "\n줄: " + line); return false; };
 
@@ -111,7 +112,7 @@
     const VAD_STOP_MULT = 1.4, VAD_STOP_MIN = 0.0035, VAD_SILENCE_LIMIT = 25;
 
     let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
-    let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null, pendingPlayReset=false, guestLang="ja";
+    let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null, pendingPlayReset=false, guestLang="ja", streamer=null;
     let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
     let myRole=null, roomId=null;
 
@@ -184,6 +185,9 @@
         source.connect(hp).connect(lp).connect(workletNode);
         const silent=inputCtx.createGain(); silent.gain.value=0;
         workletNode.connect(silent).connect(inputCtx.destination);
+
+        // 검증된 연속 재생 엔진 초기화
+        streamer = new AudioStreamer(outputCtx);
 
         // 역할별 라벨
         if(myRole==="driver"){ mineLabel.textContent="내가 한 말 (한국어)"; otherLabel.textContent="승객 말 (한국어로 번역됨)"; }
@@ -283,18 +287,9 @@
       for(let i=0;i<bin.length;i++) b[i]=bin.charCodeAt(i); return b.buffer; }
 
     function playPcm(buf){
-      if(!outputCtx) return;
-      if(outputCtx.state==="suspended") {
-        outputCtx.resume();
-      }
-      const int16=new Int16Array(buf); const f32=new Float32Array(int16.length);
-      for(let i=0;i<int16.length;i++) f32[i]=int16[i]/0x8000;
-      const audioBuf=outputCtx.createBuffer(1,f32.length,OUTPUT_RATE);
-      audioBuf.getChannelData(0).set(f32);
-      const src=outputCtx.createBufferSource(); src.buffer=audioBuf; src.connect(outputCtx.destination);
-      const now=outputCtx.currentTime;
-      if(pendingPlayReset || playHead<now+0.02){ playHead=now+0.08; pendingPlayReset=false; }
-      src.start(playHead); playHead+=audioBuf.duration; playingUntil=playHead;
+      if(!streamer) return;
+      if(outputCtx && outputCtx.state==="suspended") outputCtx.resume();
+      streamer.addPCM16(new Uint8Array(buf));
     }
   </script>
 </body>
