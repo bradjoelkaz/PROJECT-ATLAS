@@ -294,6 +294,7 @@
     let sending = false;
     let playHead = 0;
     let playingUntil = 0;
+    let lastAudioAt = 0;
     let playerNode = null;
 
     let dialogueHistory = [];
@@ -586,9 +587,13 @@
       src.buffer = audioBuf;
       src.connect(outputCtx.destination);
 
-      // 겹침 방지(지지직 완화): 뒤처졌을 때만 약간 선버퍼, 앞서면 이어붙임.
+      // 겹침 방지(지지직 완화) + 새 턴 지연 누적 방지.
+      // 이전 청크와 0.3초 이상 떨어졌으면(새 발화 턴) 재생헤드를 현재로 리셋.
       const now = outputCtx.currentTime;
-      if (playHead < now + 0.02) playHead = now + 0.12;
+      if (playHead < now + 0.02 || (now - lastAudioAt) > 0.3) {
+        playHead = now + 0.08;
+      }
+      lastAudioAt = now;
       src.start(playHead);
       playHead += audioBuf.duration;
       playingUntil = playHead;
@@ -751,6 +756,14 @@
       if (finalizeTimer) finalizeTurn();
       if (stopSendingTimer) { clearTimeout(stopSendingTimer); stopSendingTimer = null; }
 
+      // 화자 전환 시: 이전 화자가 아직 전송 중이면 그 세션을 즉시 종료(audio_end).
+      // (backend state[active]가 아직 이전 화자이므로 audio_end 가 이전 세션으로 감)
+      // 이걸 안 하면 이전 세션이 매달려 번역이 늦게/꼬여서 나온다.
+      if (sending && currentSpeaker && currentSpeaker !== speaker &&
+          ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "audio_end" }));
+      }
+
       if (inputCtx && inputCtx.state === "suspended") inputCtx.resume();
       if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
       
@@ -789,7 +802,7 @@
           console.log("Safeguard timeout fired - finalizing turn");
           finalizeTurn();
         }, 8000);
-      }, 450);
+      }, 200);
     }
 
     function wireButton(btn, speaker) {

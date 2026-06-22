@@ -103,7 +103,7 @@
     const VAD_STOP_MULT = 1.4, VAD_STOP_MIN = 0.0035, VAD_SILENCE_LIMIT = 25;
 
     let ws=null, inputCtx=null, outputCtx=null, workletNode=null, micStream=null;
-    let sending=false, playHead=0, playingUntil=0, playerNode=null;
+    let sending=false, playHead=0, playingUntil=0, lastAudioAt=0, playerNode=null;
     let noiseFloor=0.005, vadSpeaking=false, vadSilenceFrames=0, preRollBuffer=[];
     let myRole=null, roomId=null;
 
@@ -284,7 +284,8 @@
       audioBuf.getChannelData(0).set(f32);
       const src=outputCtx.createBufferSource(); src.buffer=audioBuf; src.connect(outputCtx.destination);
       const now=outputCtx.currentTime;
-      if(playHead<now+0.02) playHead=now+0.12;
+      if(playHead<now+0.02 || (now-lastAudioAt)>0.3) playHead=now+0.08;
+      lastAudioAt=now;
       src.start(playHead); playHead+=audioBuf.duration; playingUntil=playHead;
     }
   </script>
