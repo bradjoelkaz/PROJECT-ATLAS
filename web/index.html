@@ -364,6 +364,8 @@
       document.body.style.paddingTop = "62px";
     })();
 
+    let audioChunksCount = 0;
+
     // ── 화면 디버그 오버레이 (핸즈프리/VAD 진단용) ──
     // 서버 콘솔을 못 보는 폰에서도 상태를 바로 확인할 수 있도록 화면 하단에 실시간 표시.
     const dbg = document.createElement("div");
@@ -377,9 +379,11 @@
     function updateDebug(rms, startThr) {
       dbgFrames++;
       if (dbgFrames % 3 !== 0) return; // 약 120ms마다 갱신
+      const ctxState = outputCtx ? outputCtx.state : "-";
       dbg.textContent =
         `ws=${ws ? ws.readyState : "-"}  핸즈프리=${handsfreeToggle.checked ? "ON" : "off"}  화자=${currentSpeaker || "-"}  전송=${sending ? 1 : 0}  발화=${vadSpeaking ? 1 : 0}\n` +
-        `rms=${rms.toFixed(4)}  소음바닥=${noiseFloor.toFixed(4)}  시작임계=${startThr.toFixed(4)}  프레임=${dbgFrames}`;
+        `rms=${rms.toFixed(4)}  소음바닥=${noiseFloor.toFixed(4)}  시작임계=${startThr.toFixed(4)}\n` +
+        `오디오컨텍스트=${ctxState}  수신청크=${audioChunksCount}  재생헤드=${playHead.toFixed(2)}`;
     }
 
     function setStatus(text, kind) {
@@ -412,22 +416,22 @@
 
       let item = null;
       if (currentSpeaker === "host") {
-        if (currentHostInput || currentHostOutput) {
+        if (currentHostInput || currentGuestOutput) {
           item = {
             id: Date.now(),
             speaker: "host",
             original: currentHostInput || "(음성 인식 완료)",
-            translated: currentHostOutput || "",
+            translated: currentGuestOutput || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
       } else if (currentSpeaker === "guest") {
-        if (currentGuestInput || currentGuestOutput) {
+        if (currentGuestInput || currentHostOutput) {
           item = {
             id: Date.now(),
             speaker: "guest",
             original: currentGuestInput || "(음성 인식 완료)",
-            translated: currentGuestOutput || "",
+            translated: currentHostOutput || "",
             audio: mergeBuffers(currentAudioChunks)
           };
         }
@@ -566,6 +570,10 @@
 
     function playPcm(buf) {
       if (!playerNode || !outputCtx) return;
+      if (outputCtx.state === "suspended") {
+        outputCtx.resume();
+      }
+      audioChunksCount++;
       const int16 = new Int16Array(buf);
       const f32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;

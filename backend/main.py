@@ -71,8 +71,8 @@ def build_config(target_language_code: str) -> types.LiveConnectConfig:
         output_audio_transcription=types.AudioTranscriptionConfig(),
         translation_config=types.TranslationConfig(
             target_language_code=target_language_code,
-            # 입력이 이미 목적지 언어일 때 따라 말하지 않고 침묵.
-            echo_target_language=False,
+            # 입력이 이미 목적지 언어일 때 따라 말하게 하여 오인식 시에도 침묵하지 않도록 함.
+            echo_target_language=True,
         ),
     )
 
@@ -105,11 +105,11 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     client = genai.Client(api_key=API_KEY)
 
-    # 세션 A: 무엇이든 한국어(HOST)로 번역 → 기사가 들음 (출력 방향: to_host)
-    cfg_to_host = build_config(HOST_LANGUAGE)
+    # 세션 A: 무엇이든 외국어(GUEST)로 듣고 한국어(HOST)로 번역 → 기사가 들음 (출력 방향: to_host)
+    cfg_to_host = build_config(target_language_code=HOST_LANGUAGE)
 
-    # 세션 B: 무엇이든 외국어(GUEST)로 번역 → 승객이 들음 (출력 방향: to_guest)
-    cfg_to_guest = build_config(GUEST_LANGUAGE)
+    # 세션 B: 무엇이든 한국어(HOST)로 듣고 외국어(GUEST)로 번역 → 승객이 들음 (출력 방향: to_guest)
+    cfg_to_guest = build_config(target_language_code=GUEST_LANGUAGE)
 
     # 현재 활성 화자. "guest"=승객(외국어), "host"=기사(한국어). 기본은 승객.
     state = {"active": "guest"}
@@ -270,9 +270,9 @@ class CallRoom:
 
     async def _run(self) -> None:
         # driver(한국어) → 외국어로 번역 → passenger 가 들음
-        cfg_driver = build_config(GUEST_LANGUAGE)
+        cfg_driver = build_config(target_language_code=GUEST_LANGUAGE)
         # passenger(외국어) → 한국어로 번역 → driver 가 들음
-        cfg_passenger = build_config(HOST_LANGUAGE)
+        cfg_passenger = build_config(target_language_code=HOST_LANGUAGE)
         try:
             async with (
                 self.client.aio.live.connect(model=MODEL, config=cfg_driver) as sess_driver,

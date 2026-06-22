@@ -279,6 +279,9 @@
 
     function playPcm(buf){
       if(!playerNode||!outputCtx) return;
+      if(outputCtx.state==="suspended") {
+        outputCtx.resume();
+      }
       const int16=new Int16Array(buf); const f32=new Float32Array(int16.length);
       for(let i=0;i<int16.length;i++) f32[i]=int16[i]/0x8000;
       const now=outputCtx.currentTime;
