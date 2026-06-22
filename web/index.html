@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Project Atlas - 양방향 번역 PoC</title>
+  <style>
+    :root {
+      --bg: #090b0e;
+      --card: #15181f;
+      --line: #242936;
+      --host: #2563eb;
+      --host-bg: rgba(37, 99, 235, 0.12);
+      --guest: #10b981;
+      --guest-bg: rgba(16, 185, 129, 0.12);
+      --muted: #6b7280;
+      --text: #f3f4f6;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    header {
+      width: 100%; max-width: 520px; padding: 20px 16px 8px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .header-left h1 { font-size: 19px; margin: 0 0 4px; font-weight: 800; letter-spacing: -0.5px; }
+    .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #4b5563; display: inline-block; }
+    .dot.on { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .dot.err { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+
+    /* 기록 보기 버튼 */
+    .history-trigger-btn {
+      padding: 10px 16px; font-size: 13px; font-weight: 700; border-radius: 12px;
+      border: 1px solid var(--line); background: var(--card); color: var(--text);
+      cursor: pointer; display: flex; align-items: center; gap: 6px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .history-trigger-btn:hover { background: #1d212b; border-color: #3b82f6; }
+    .history-trigger-btn span.badge {
+      background: #3b82f6; color: white; font-size: 10px; padding: 2px 6px;
+      border-radius: 999px; margin-left: 2px;
+    }
+
+    main { width: 100%; max-width: 520px; padding: 8px 16px 24px; flex: 1; display: flex; flex-direction: column; gap: 16px; }
+
+    #startBtn {
+      width: 100%; padding: 18px; font-size: 17px; font-weight: 700; border: none; border-radius: 16px;
+      background: #3b82f6; color: white; cursor: pointer; transition: background 0.2s;
+    }
+    #startBtn:active { background: #2563eb; }
+    #startBtn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .talk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .talk {
+      padding: 24px 12px; border-radius: 20px; border: 2px solid var(--line); background: var(--card);
+      color: var(--text); font-size: 17px; font-weight: 800; text-align: center; cursor: pointer;
+      user-select: none; touch-action: none; transition: transform .05s, background .15s, border-color .15s;
+    }
+    .talk small { display: block; font-weight: 500; font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .talk.guest.active { background: var(--guest); border-color: var(--guest); transform: scale(0.96); color: white; }
+    .talk.host.active { background: var(--host); border-color: var(--host); transform: scale(0.96); color: white; }
+    .talk.guest.active small, .talk.host.active small { color: rgba(255, 255, 255, 0.8); }
+    .talk:disabled, .talk[aria-disabled="true"] { opacity: .35; cursor: not-allowed; }
+
+    .hint { font-size: 12px; color: var(--muted); text-align: center; margin-top: -4px; }
+
+    /* 실시간 자막 영역 */
+    .live-subtitle-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 4px;
+    }
+    .subtitle-card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      min-height: 90px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .subtitle-card.highlight-host { border-color: var(--host); box-shadow: 0 0 12px rgba(37, 99, 235, 0.15); }
+    .subtitle-card.highlight-guest { border-color: var(--guest); box-shadow: 0 0 12px rgba(16, 185, 129, 0.15); }
+    
+    .card-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .subtitle-card.highlight-host .card-label { color: var(--host); }
+    .subtitle-card.highlight-guest .card-label { color: var(--guest); }
+    
+    .card-text { font-size: 16px; font-weight: 600; line-height: 1.5; min-height: 24px; color: #9ca3af; }
+    .subtitle-card.active-input .card-text { color: var(--text); }
+
+    /* 핸즈프리 설정 및 레벨 미터 스타일 */
+    .mode-settings {
+      width: 100%; background: var(--card); border: 1px solid var(--line);
+      border-radius: 16px; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .toggle-container { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
+    .toggle-text { font-size: 14px; font-weight: 700; color: #cbd5e1; }
+    .toggle-switch {
+      position: relative; display: inline-block; width: 44px; height: 24px;
+    }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #374151; transition: .3s; border-radius: 24px;
+    }
+    .slider:before {
+      position: absolute; content: ""; height: 16px; width: 16px; left: 4px; bottom: 4px;
+      background-color: white; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .slider { background-color: #3b82f6; }
+    input:checked + .slider:before { transform: translateX(20px); }
+
+    .meter-container { display: none; align-items: center; gap: 10px; margin-top: 4px; }
+    .meter-container.active { display: flex; }
+    .meter-bar-wrapper { flex: 1; height: 6px; background: #1f2937; border-radius: 999px; overflow: hidden; }
+    .meter-bar { width: 0%; height: 100%; background: #3b82f6; transition: width 0.05s ease; }
+    .meter-label { font-size: 11px; font-weight: 700; color: var(--muted); min-width: 40px; text-align: right; }
+
+    /* 대화 기록 모달 (Overlay) */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(12px);
+      display: flex; justify-content: center; align-items: flex-end;
+      z-index: 1000; opacity: 0; pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+    .modal-overlay.open { opacity: 1; pointer-events: auto; }
+    
+    .modal-content {
+      width: 100%; max-width: 520px; height: 85vh;
+      background: #11141b; border-radius: 28px 28px 0 0;
+      border: 1px solid var(--line); border-bottom: none;
+      display: flex; flex-direction: column;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .modal-overlay.open .modal-content { transform: translateY(0); }
+
+
+    .modal-header {
+      padding: 18px 20px; border-bottom: 1px solid var(--line);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .modal-header h2 { margin: 0; font-size: 18px; font-weight: 800; }
+    .close-btn {
+      font-size: 22px; background: none; border: none; color: var(--muted);
+      cursor: pointer; padding: 4px 10px; border-radius: 8px;
+    }
+    .close-btn:hover { color: var(--text); background: var(--line); }
+
+    /* 메신저 채팅 스타일 피드 */
+    .chat-feed {
+      flex: 1; overflow-y: auto; padding: 20px 16px;
+      display: flex; flex-direction: column; gap: 18px;
+    }
+    .chat-bubble-container {
+      display: flex; flex-direction: column; width: 100%;
+    }
+    /* 기사(Host) 말풍선 - 우측 정렬, 파란색 테두리 */
+    .chat-bubble-container.host-side { align-items: flex-end; }
+    /* 승객(Guest) 말풍선 - 좌측 정렬, 초록색 테두리 */
+    .chat-bubble-container.guest-side { align-items: flex-start; }
+
+    .chat-meta { font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 4px; padding: 0 4px; }
+    
+    .chat-bubble {
+      max-width: 85%; padding: 14px 16px; border-radius: 18px;
+      font-size: 15px; line-height: 1.5; position: relative;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .host-side .chat-bubble {
+      background: var(--host-bg); border: 1px solid rgba(37, 99, 235, 0.3);
+      border-top-right-radius: 4px; color: #e2e8f0;
+    }
+    .guest-side .chat-bubble {
+      background: var(--guest-bg); border: 1px solid rgba(16, 185, 129, 0.3);
+      border-top-left-radius: 4px; color: #e2e8f0;
+    }
+
+    .bubble-original { font-size: 13px; color: #9ca3af; border-bottom: 1px dashed rgba(255, 255, 255, 0.1); padding-bottom: 6px; }
+    .bubble-translated { font-weight: 700; font-size: 15px; color: var(--text); }
+    
+    /* 다시 듣기 버튼 */
+    .replay-btn {
+      align-self: flex-end; display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(255, 255, 255, 0.08); border: none; border-radius: 8px;
+      color: #9ca3af; font-size: 11px; font-weight: 700; padding: 5px 10px;
+      cursor: pointer; transition: background 0.2s, color 0.2s;
+    }
+    .replay-btn:hover { background: #3b82f6; color: white; }
+
+    .empty-history {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--muted); gap: 10px; font-size: 14px;
+    }
+
+    .footer { font-size: 11px; color: var(--muted); text-align: center; padding: 16px 0 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>🚕 Project Atlas</h1>
+      <div class="status"><span id="dot" class="dot"></span><span id="statusText">대기 중</span></div>
+    </div>
+    <button class="history-trigger-btn" id="historyOpenBtn">
+      📜 대화 기록 <span class="badge" id="historyCountBadge">0</span>
+    </button>
+  </header>
+
+  <main>
+    <button id="startBtn">🎤 시작하기 (마이크 권한 허용)</button>
+
+    <div class="talk-grid">
+      <button id="guestBtn" class="talk guest" aria-disabled="true">
+        🌐 승객 말하기
+        <small id="guestLabel">외국어 → 한국어</small>
+      </button>
+      <button id="hostBtn" class="talk host" aria-disabled="true">
+        🇰🇷 내가 말하기
+        <small id="hostLabel">한국어 → 외국어</small>
+      </button>
+    </div>
+    <div class="hint" id="usageHint">버튼을 <b>누르고 있는 동안</b> 말하세요. 떼면 전송이 멈춥니다.</div>
+
+    <div class="mode-settings">
+      <div class="toggle-container">
+        <span class="toggle-text">🎙️ 핸즈프리 자동 음성 감지 (VAD)</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="handsfreeToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="meter-container" id="vadMeterContainer">
+        <div class="meter-bar-wrapper">
+          <div class="meter-bar" id="vadMeterBar"></div>
+        </div>
+        <span class="meter-label" id="vadMeterLabel">OFF</span>
+      </div>
+    </div>
+
+    <div class="live-subtitle-container">
+      <div id="liveHostCard" class="subtitle-card">
+        <div class="card-label">🇰🇷 내가 한 말 (기사)</div>
+        <div class="card-text" id="liveHostText">대기 중...</div>
+      </div>
+      <div id="liveGuestCard" class="subtitle-card">
+        <div class="card-label">🌐 승객이 한 말 (외국어)</div>
+        <div class="card-text" id="liveGuestText">대기 중...</div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 대화 기록 모달 레이어 -->
+  <div class="modal-overlay" id="historyModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>📜 대화 기록 전체보기</h2>
+        <button class="close-btn" id="historyCloseBtn">✕</button>
+      </div>
+      <div class="chat-feed" id="historyChatFeed">
+        <div class="empty-history">
+          <span>📜 아직 완료된 대화가 없습니다.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">번역: Gemini Live (gemini-3.5-live-translate-preview) · 입력 16kHz / 출력 24kHz PCM</div>
+
+  <script>
+    // 모바일 폰 런타임 디버깅용 에러 포착 핸들러
+    window.onerror = function(msg, url, line) {
+      alert("웹앱 에러 발생: " + msg + "\n위치: " + line + "번째 줄");
+      return false;
+    };
+
+    const INPUT_RATE = 16000;
+    const OUTPUT_RATE = 24000;
+
+    let ws = null;
+    let inputCtx = null;
+    let outputCtx = null;
+    let workletNode = null;
+    let micStream = null;
+    let sending = false;
+    let playHead = 0;
+
+    let dialogueHistory = [];
+    let currentAudioChunks = [];
+    let currentSpeaker = null;
+    let currentHostInput = "";
+    let currentHostOutput = "";
+    let currentGuestInput = "";
+    let currentGuestOutput = "";
+    let finalizeTimer = null;
+    let stopSendingTimer = null;
+
+    let lastActiveSpeaker = "host";
+    let vadSpeaking = false;
+    let vadSilenceTimer = null;
+    let preRollBuffer = [];
+    
+    // 동적 소음 극복 VAD 변수 선언
+    let noiseFloor = 0.005; // 대기 소음의 평균 RMS 수준
+    let vadSilenceFrames = 0; // 침묵 프레임 개수 누적
+    const VAD_SILENCE_LIMIT = 25; // 25프레임 * 40ms = 약 1.0초 침묵 시 턴 종결
+
+    const dot = document.getElementById("dot");
+    const statusText = document.getElementById("statusText");
+    const startBtn = document.getElementById("startBtn");
+    const guestBtn = document.getElementById("guestBtn");
+    const hostBtn = document.getElementById("hostBtn");
+
+    const liveHostCard = document.getElementById("liveHostCard");
+    const liveHostText = document.getElementById("liveHostText");
+    const liveGuestCard = document.getElementById("liveGuestCard");
+    const liveGuestText = document.getElementById("liveGuestText");
+
+    const historyModal = document.getElementById("historyModal");
+    const historyOpenBtn = document.getElementById("historyOpenBtn");
+    const historyCloseBtn = document.getElementById("historyCloseBtn");
+    const historyChatFeed = document.getElementById("historyChatFeed");
+    const historyCountBadge = document.getElementById("historyCountBadge");
+
+    const handsfreeToggle = document.getElementById("handsfreeToggle");
+    const vadMeterContainer = document.getElementById("vadMeterContainer");
+    const vadMeterBar = document.getElementById("vadMeterBar");
+    const vadMeterLabel = document.getElementById("vadMeterLabel");
+    const usageHint = document.getElementById("usageHint");
+
+    function setStatus(text, kind) {
+      statusText.textContent = text;
+      dot.className = "dot" + (kind === "on" ? " on" : kind === "err" ? " err" : "");
+    }
+
+    function mergeBuffers(buffers) {
+      if (buffers.length === 0) return null;
+      let totalLength = 0;
+      buffers.forEach(b => totalLength += b.byteLength);
+      const tmp = new Uint8Array(totalLength);
+      let offset = 0;
+      buffers.forEach(b => {
+        tmp.set(new Uint8Array(b), offset);
+        offset += b.byteLength;
+      });
+      return tmp.buffer;
+    }
+
+    function finalizeTurn() {
+      if (finalizeTimer) {
+        clearTimeout(finalizeTimer);
+        finalizeTimer = null;
+      }
+      if (stopSendingTimer) {
+        clearTimeout(stopSendingTimer);
+        stopSendingTimer = null;
+      }
+
+      let item = null;
+      if (currentSpeaker === "host") {
+        if (currentHostInput || currentHostOutput) {
+          item = {
+            id: Date.now(),
+            speaker: "host",
+            original: currentHostInput || "(음성 인식 완료)",
+            translated: currentHostOutput || "",
+            audio: mergeBuffers(currentAudioChunks)
+          };
+        }
+      } else if (currentSpeaker === "guest") {
+        if (currentGuestInput || currentGuestOutput) {
+          item = {
+            id: Date.now(),
+            speaker: "guest",
+            original: currentGuestInput || "(음성 인식 완료)",
+            translated: currentGuestOutput || "",
+            audio: mergeBuffers(currentAudioChunks)
+          };
+        }
+      }
+
+      if (item) {
+        dialogueHistory.push(item);
+        historyCountBadge.textContent = dialogueHistory.length;
+      }
+
+      liveHostCard.className = "subtitle-card";
+      liveGuestCard.className = "subtitle-card";
+      liveHostText.textContent = "대기 중...";
+      liveGuestText.textContent = "대기 중...";
+
+      currentSpeaker = null;
+      currentHostInput = "";
+      currentHostOutput = "";
+      currentGuestInput = "";
+      currentGuestOutput = "";
+      currentAudioChunks = [];
+    }
+
+    function rearmHandsfreeSpeaker() {
+      if (!handsfreeToggle.checked) return;
+
+      if (vadSilenceTimer) { clearTimeout(vadSilenceTimer); vadSilenceTimer = null; }
+      if (finalizeTimer) { clearTimeout(finalizeTimer); finalizeTimer = null; }
+      if (stopSendingTimer) { clearTimeout(stopSendingTimer); stopSendingTimer = null; }
+
+      vadSpeaking = false;
+      sending = false;
+      vadSilenceFrames = 0;
+      currentSpeaker = lastActiveSpeaker;
+      
+      if (currentSpeaker === "host") {
+        liveHostCard.className = "subtitle-card highlight-host active-input";
+        liveHostText.textContent = "듣고 있습니다. 말씀하세요...";
+        liveGuestCard.className = "subtitle-card highlight-host";
+        liveGuestText.textContent = "번역 대기 중...";
+      } else {
+        liveGuestCard.className = "subtitle-card highlight-guest active-input";
+        liveGuestText.textContent = "듣고 있습니다. 말씀하세요...";
+        liveHostCard.className = "subtitle-card highlight-guest";
+        liveHostText.textContent = "번역 대기 중...";
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "active", speaker: currentSpeaker }));
+      }
+    }
+
+    function handleVad(rms, threshold) {
+      if (!handsfreeToggle.checked) {
+        vadMeterContainer.classList.remove("active");
+        return;
+      }
+
+      vadMeterContainer.classList.add("active");
+      const pct = Math.min(100, Math.round((rms / 0.1) * 100));
+      vadMeterBar.style.width = pct + "%";
+
+      if (!currentSpeaker) {
+        vadMeterLabel.textContent = "대기 중";
+        vadMeterLabel.style.color = "var(--muted)";
+        return;
+      }
+
+      if (rms > threshold) {
+        vadSilenceFrames = 0;
+        vadMeterLabel.textContent = "🎙️ 음성 감지 전송";
+        vadMeterLabel.style.color = currentSpeaker === "host" ? "#60a5fa" : "#34d399";
+
+        if (vadSilenceTimer) {
+          clearTimeout(vadSilenceTimer);
+          vadSilenceTimer = null;
+        }
+
+        if (!vadSpeaking) {
+          vadSpeaking = true;
+          sending = true;
+          if (currentSpeaker === "host") {
+            liveHostText.textContent = "말씀하시는 중 (음성 전송)...";
+          } else {
+            liveGuestText.textContent = "말씀하시는 중 (음성 전송)...";
+          }
+        }
+      } else {
+        if (vadSpeaking) {
+          vadSilenceFrames++;
+          const remainingSec = Math.max(0, ((VAD_SILENCE_LIMIT - vadSilenceFrames) * 0.04).toFixed(1));
+          vadMeterLabel.textContent = `침묵 감지 (${remainingSec}초 남음)`;
+          vadMeterLabel.style.color = "#f59e0b";
+
+          if (vadSilenceFrames >= VAD_SILENCE_LIMIT) {
+            vadSpeaking = false;
+            sending = false;
+            vadSilenceFrames = 0;
+            
+            console.log("Dynamic VAD: Speech Ended");
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "audio_end" }));
+            }
+            if (finalizeTimer) clearTimeout(finalizeTimer);
+            finalizeTimer = setTimeout(() => {
+              console.log("Dynamic VAD Safeguard timeout");
+              finalizeTurn();
+              rearmHandsfreeSpeaker();
+            }, 8000);
+          }
+        } else {
+          vadMeterLabel.textContent = "소리 대기";
+          vadMeterLabel.style.color = "var(--muted)";
+        }
+      }
+    }
+
+    function bufToBase64(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(bin);
+    }
+    function base64ToBuf(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    function playPcm(buf) {
+      if (!outputCtx) return;
+      const int16 = new Int16Array(buf);
+      const f32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
+
+      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
+      audioBuf.getChannelData(0).set(f32);
+      const src = outputCtx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(outputCtx.destination);
+
+      const now = outputCtx.currentTime;
+      if (playHead < now || (playHead - now) > 0.15) {
+        playHead = now;
+      }
+      src.start(playHead);
+      playHead += audioBuf.duration;
+    }
+
+    function connectWs() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+      ws.onopen = () => setStatus("연결됨 — 버튼을 눌러 말하세요", "on");
+      ws.onclose = () => setStatus("연결 종료됨", "err");
+      ws.onerror = () => setStatus("연결 오류", "err");
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        switch (msg.type) {
+          case "status":
+            if (msg.guest_language) {
+              guestBtn.querySelector("small").textContent = `${msg.guest_language} → ${msg.host_language}`;
+              hostBtn.querySelector("small").textContent = `${msg.host_language} → ${msg.guest_language}`;
+            }
+            setStatus("세션 연결됨 — 말해보세요", "on");
+            break;
+          case "input_transcript":
+            if (msg.direction === "to_guest") {
+              currentHostInput = msg.text;
+              liveHostText.textContent = currentHostInput;
+            } else if (msg.direction === "to_host") {
+              currentGuestInput = msg.text;
+              liveGuestText.textContent = currentGuestInput;
+            }
+            break;
+          case "output_transcript":
+            if (msg.direction === "to_guest") {
+              currentGuestOutput = msg.text;
+              liveGuestText.textContent = currentGuestOutput;
+            } else if (msg.direction === "to_host") {
+              currentHostOutput = msg.text;
+              liveHostText.textContent = currentHostOutput;
+            }
+            break;
+          case "audio":
+            const chunk = base64ToBuf(msg.data);
+            currentAudioChunks.push(chunk);
+            playPcm(chunk);
+            break;
+          case "turn_complete":
+            if (finalizeTimer) {
+              clearTimeout(finalizeTimer);
+              finalizeTimer = null;
+            }
+            finalizeTurn();
+            if (handsfreeToggle.checked) {
+              lastActiveSpeaker = (lastActiveSpeaker === "host") ? "guest" : "host";
+              rearmHandsfreeSpeaker();
+            }
+            break;
+          case "error":
+            setStatus("오류: " + msg.text, "err");
+            break;
+        }
+      };
+    }
+
+    async function start() {
+      startBtn.disabled = true;
+      try {
+        inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: INPUT_RATE });
+        outputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_RATE });
+
+        if (inputCtx.state === "suspended") await inputCtx.resume();
+        if (outputCtx.state === "suspended") await outputCtx.resume();
+
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+
+        await inputCtx.audioWorklet.addModule("pcm-processor.js");
+        const source = inputCtx.createMediaStreamSource(micStream);
+        
+        // 하이패스 필터 (150Hz) - 저주파 엔진 차량 노이즈 억제
+        const hpFilter = inputCtx.createBiquadFilter();
+        hpFilter.type = "highpass";
+        hpFilter.frequency.value = 150;
+        
+        // 로우패스 필터 (3000Hz) - 고주파 날카로운 바람소리 억제
+        const lpFilter = inputCtx.createBiquadFilter();
+        lpFilter.type = "lowpass";
+        lpFilter.frequency.value = 3000;
+
+        workletNode = new AudioWorkletNode(inputCtx, "pcm-processor");
+        workletNode.port.onmessage = (e) => {
+          const int16 = new Int16Array(e.data);
+          let sumSq = 0;
+          for (let i = 0; i < int16.length; i++) {
+            const val = int16[i] / 0x8000;
+            sumSq += val * val;
+          }
+          const rms = Math.sqrt(sumSq / int16.length);
+          
+          // 동적 소음 측정 (Adaptive Noise Floor)
+          if (rms < noiseFloor) {
+            noiseFloor = rms;
+          } else {
+            noiseFloor = noiseFloor * 0.999 + rms * 0.001;
+          }
+          const dynamicThreshold = Math.max(0.008, noiseFloor * 2.0);
+          
+          handleVad(rms, dynamicThreshold);
+
+          if (sending) {
+            if (preRollBuffer.length > 0) {
+              while (preRollBuffer.length > 0) {
+                const oldData = preRollBuffer.shift();
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: "audio", data: bufToBase64(oldData) }));
+                }
+              }
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "audio", data: bufToBase64(e.data) }));
+            }
+          } else {
+            preRollBuffer.push(e.data);
+            if (preRollBuffer.length > 3) {
+              preRollBuffer.shift();
+            }
+          }
+        };
+        
+        // 스트림을 필터에 통과시킨 뒤 pcm-processor로 주입
+        source.connect(hpFilter).connect(lpFilter).connect(workletNode);
+        
+        const silent = inputCtx.createGain();
+        silent.gain.value = 0;
+        workletNode.connect(silent).connect(inputCtx.destination);
+
+        connectWs();
+
+        guestBtn.removeAttribute("aria-disabled");
+        hostBtn.removeAttribute("aria-disabled");
+        startBtn.textContent = "✅ 준비됨";
+      } catch (err) {
+        setStatus("마이크 초기화 실패: " + err.message, "err");
+        startBtn.disabled = false;
+      }
+    }
+
+    function beginTalk(speaker, btn) {
+      if (btn.getAttribute("aria-disabled") === "true") return;
+
+      if (finalizeTimer) finalizeTurn();
+      if (stopSendingTimer) { clearTimeout(stopSendingTimer); stopSendingTimer = null; }
+
+      if (inputCtx && inputCtx.state === "suspended") inputCtx.resume();
+      if (outputCtx && outputCtx.state === "suspended") outputCtx.resume();
+      
+      sending = true;
+      currentSpeaker = speaker;
+      btn.classList.add("active");
+
+      if (speaker === "host") {
+        liveHostCard.className = "subtitle-card highlight-host active-input";
+        liveHostText.textContent = "듣고 있습니다. 말씀하세요...";
+        liveGuestCard.className = "subtitle-card highlight-host";
+        liveGuestText.textContent = "번역 대기 중...";
+      } else {
+        liveGuestCard.className = "subtitle-card highlight-guest active-input";
+        liveGuestText.textContent = "듣고 있습니다. 말씀하세요...";
+        liveHostCard.className = "subtitle-card highlight-guest";
+        liveHostText.textContent = "번역 대기 중...";
+      }
+
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "active", speaker }));
+      }
+    }
+
+    function endTalk(btn) {
+      btn.classList.remove("active");
+
+      if (stopSendingTimer) clearTimeout(stopSendingTimer);
+      stopSendingTimer = setTimeout(() => {
+        sending = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "audio_end" }));
+        }
+        if (finalizeTimer) clearTimeout(finalizeTimer);
+        finalizeTimer = setTimeout(() => {
+          console.log("Safeguard timeout fired - finalizing turn");
+          finalizeTurn();
+        }, 8000);
+      }, 450);
+    }
+
+    function wireButton(btn, speaker) {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        
+        if (handsfreeToggle.checked) {
+          // 핸즈프리 모드일 때는 탭 시 해당 화자로 수동 강제 대기 전환
+          lastActiveSpeaker = speaker;
+          rearmHandsfreeSpeaker();
+          return;
+        }
+
+        // 1회 탭 토글식 PTT 제어
+        if (sending && currentSpeaker === speaker) {
+          // 말하고 있던 사람이 다시 탭하면 즉시 전송 종료
+          endTalk(btn);
+        } else {
+          // 대기 중이거나 다른 화자일 때 탭하면 전송 시작
+          if (sending && currentSpeaker !== speaker) {
+            const activeBtn = (currentSpeaker === "host") ? hostBtn : guestBtn;
+            endTalk(activeBtn);
+          }
+          beginTalk(speaker, btn);
+        }
+      });
+    }
+
+    function renderHistory() {
+      historyChatFeed.innerHTML = "";
+      if (dialogueHistory.length === 0) {
+        historyChatFeed.innerHTML = `
+          <div class="empty-history">
+            <span>📜 아직 완료된 대화가 없습니다.</span>
+          </div>
+        `;
+        return;
+      }
+      dialogueHistory.forEach((item) => {
+        const container = document.createElement("div");
+        container.className = "chat-bubble-container " + (item.speaker === "host" ? "host-side" : "guest-side");
+        const meta = document.createElement("div");
+        meta.className = "chat-meta";
+        meta.textContent = item.speaker === "host" ? "🇰🇷 기사" : "🌐 승객";
+        container.appendChild(meta);
+        const bubble = document.createElement("div");
+        bubble.className = "chat-bubble";
+        const originalDiv = document.createElement("div");
+        originalDiv.className = "bubble-original";
+        originalDiv.textContent = item.original;
+        bubble.appendChild(originalDiv);
+        const translatedDiv = document.createElement("div");
+        translatedDiv.className = "bubble-translated";
+        translatedDiv.textContent = item.translated || "(음성 없음)";
+        bubble.appendChild(translatedDiv);
+        if (item.audio) {
+          const replayBtn = document.createElement("button");
+          replayBtn.className = "replay-btn";
+          replayBtn.innerHTML = "🔊 다시 듣기";
+          replayBtn.addEventListener("click", () => {
+            // 해당 대화의 번역 음성을 다시 24kHz PCM 재생기에 넣습니다.
+            playPcm(item.audio);
+          });
+          bubble.appendChild(replayBtn);
+        }
+
+        container.appendChild(bubble);
+        historyChatFeed.appendChild(container);
+      });
+
+      // 가장 최근 대화가 보이도록 하단으로 자동 스크롤
+      historyChatFeed.scrollTop = historyChatFeed.scrollHeight;
+    }
+
+    // 모달 제어 함수
+    function openHistoryModal() {
+      renderHistory();
+      historyModal.classList.add("open");
+    }
+    function closeHistoryModal() {
+      historyModal.classList.remove("open");
+    }
+
+    // 핸즈프리 모드 토글 체인지 이벤트 리스너
+    handsfreeToggle.addEventListener("change", () => {
+      if (handsfreeToggle.checked) {
+        usageHint.innerHTML = "🎙️ <b>[핸즈프리 모드]</b> 버튼을 <b>한 번만 터치</b>하여 선택한 뒤, 폰에 대고 말하세요.";
+        lastActiveSpeaker = "host";
+        rearmHandsfreeSpeaker();
+      } else {
+        usageHint.innerHTML = "버튼을 <b>한 번 터치</b>하면 말하기 시작, <b>다시 터치</b>하면 정송이 멈춥니다.";
+        if (vadSilenceTimer) {
+          clearTimeout(vadSilenceTimer);
+          vadSilenceTimer = null;
+        }
+        vadSpeaking = false;
+        sending = false;
+        finalizeTurn();
+      }
+    });
+
+    // 이벤트 바인딩
+    startBtn.addEventListener("click", start);
+    wireButton(guestBtn, "guest");
+    wireButton(hostBtn, "host");
+
+    historyOpenBtn.addEventListener("click", openHistoryModal);
+    historyCloseBtn.addEventListener("click", closeHistoryModal);
+    historyModal.addEventListener("click", (e) => {
+      if (e.target === historyModal) {
+        closeHistoryModal();
+      }
+    });
+  </script>
+</body>
+</html>
