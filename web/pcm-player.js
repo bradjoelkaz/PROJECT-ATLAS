@@ -43,7 +43,9 @@ class PCMPlayer extends AudioWorkletProcessor {
   }
 
   process(outputs) {
-    const out = outputs[0][0];
+    const channels = outputs[0];
+    if (!channels || channels.length === 0) return true;
+    const out = channels[0];
     if (!out) return true;
 
     const ratio = this._ratio;
@@ -52,7 +54,7 @@ class PCMPlayer extends AudioWorkletProcessor {
     // 지터버퍼: 충분히 모이기 전엔 무음 출력
     if (!this._primed) {
       if (this._writeCount - Math.floor(this._readPos) < this._minPrime) {
-        out.fill(0);
+        for (let c = 0; c < channels.length; c++) channels[c].fill(0);
         return true;
       }
       this._primed = true;
@@ -74,6 +76,9 @@ class PCMPlayer extends AudioWorkletProcessor {
     }
     // 남은 구간은 무음
     for (; i < out.length; i++) out[i] = 0;
+
+    // 모노 결과를 모든 출력 채널에 복사(스테레오 장치 대응)
+    for (let c = 1; c < channels.length; c++) channels[c].set(out);
 
     return true;
   }

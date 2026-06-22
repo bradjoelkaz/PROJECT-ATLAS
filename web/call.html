@@ -178,7 +178,7 @@
 
         // 연속 재생기(지지직/끊김 제거) 로드
         await outputCtx.audioWorklet.addModule("pcm-player.js");
-        playerNode=new AudioWorkletNode(outputCtx,"pcm-player");
+        playerNode=new AudioWorkletNode(outputCtx,"pcm-player",{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[1]});
         playerNode.connect(outputCtx.destination);
 
         // 역할별 라벨
