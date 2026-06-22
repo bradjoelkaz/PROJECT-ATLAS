@@ -569,7 +569,7 @@
     }
 
     function playPcm(buf) {
-      if (!playerNode || !outputCtx) return;
+      if (!outputCtx) return;
       if (outputCtx.state === "suspended") {
         outputCtx.resume();
       }
@@ -578,14 +578,20 @@
       const f32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
 
-      // 에코 가드용 재생 종료시각 추정 갱신
-      const now = outputCtx.currentTime;
-      if (playHead < now) playHead = now;
-      playHead += f32.length / OUTPUT_RATE;
-      playingUntil = playHead;
+      // 처음에 소리가 잘 나오던 방식(createBufferSource)으로 복원.
+      // 컨텍스트가 24kHz라 버퍼 레이트와 일치 → 조각별 리샘플 잡음 없음.
+      const audioBuf = outputCtx.createBuffer(1, f32.length, OUTPUT_RATE);
+      audioBuf.getChannelData(0).set(f32);
+      const src = outputCtx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(outputCtx.destination);
 
-      // 연속 재생 워크릿으로 샘플 전달 (조각 스케줄 없이 끊김 없는 한 줄기로 재생)
-      playerNode.port.postMessage(f32, [f32.buffer]);
+      // 겹침 방지(지지직 완화): 뒤처졌을 때만 약간 선버퍼, 앞서면 이어붙임.
+      const now = outputCtx.currentTime;
+      if (playHead < now + 0.02) playHead = now + 0.12;
+      src.start(playHead);
+      playHead += audioBuf.duration;
+      playingUntil = playHead;
     }
 
     function connectWs() {
@@ -652,7 +658,7 @@
       startBtn.disabled = true;
       try {
         inputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: INPUT_RATE });
-        outputCtx = new (window.AudioContext || window.webkitAudioContext)();
+        outputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_RATE });
 
         if (inputCtx.state === "suspended") await inputCtx.resume();
         if (outputCtx.state === "suspended") await outputCtx.resume();
@@ -727,16 +733,6 @@
         const silent = inputCtx.createGain();
         silent.gain.value = 0;
         workletNode.connect(silent).connect(inputCtx.destination);
-
-        // 연속 재생기(지지직/끊김 제거) 로드
-        await outputCtx.audioWorklet.addModule("pcm-player.js");
-        // 소스형 워크릿: 입력 없음 + 출력 채널 명시(0채널 추론 → 무음 버그 방지)
-        playerNode = new AudioWorkletNode(outputCtx, "pcm-player", {
-          numberOfInputs: 0,
-          numberOfOutputs: 1,
-          outputChannelCount: [1],
-        });
-        playerNode.connect(outputCtx.destination);
 
         connectWs();
 
