@@ -23,10 +23,12 @@ class PCMPlayer extends AudioWorkletProcessor {
     this._writeCount = 0;                     // 누적 기록 소스 샘플 수
     this._readPos = 0;                        // 소수 읽기 커서(소스 샘플 단위, 절대)
     this._primed = false;
-    this._minPrime = Math.floor(SRC_RATE * 0.12); // 120ms 선버퍼
+    this._minPrime = Math.floor(SRC_RATE * 0.04); // 40ms 선버퍼 (짧은 단어도 빨리 재생)
 
     this.port.onmessage = (e) => {
       const d = e.data;
+      // 제어 메시지: turn_complete 시 남은 짧은 버퍼라도 즉시 재생되도록 강제 prime
+      if (d && d.cmd === "flush") { this._primed = true; return; }
       if (!d || !d.length) return;
       for (let i = 0; i < d.length; i++) {
         this._ring[this._writeCount % this._size] = d[i];

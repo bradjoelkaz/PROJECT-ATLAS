@@ -210,6 +210,7 @@
           case "input_transcript": mineText.textContent=m.text; break;
           case "output_transcript": otherText.textContent=m.text; break;
           case "audio": playPcm(base64ToBuf(m.data)); break;
+          case "turn_complete": if(playerNode) playerNode.port.postMessage({cmd:"flush"}); break;
           case "error": setStatus("오류: "+m.text,"err"); break;
         }
       };

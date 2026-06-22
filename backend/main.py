@@ -71,8 +71,10 @@ def build_config(target_language_code: str) -> types.LiveConnectConfig:
         output_audio_transcription=types.AudioTranscriptionConfig(),
         translation_config=types.TranslationConfig(
             target_language_code=target_language_code,
-            # 입력이 이미 목적지 언어일 때 따라 말하게 하여 오인식 시에도 침묵하지 않도록 함.
-            echo_target_language=True,
+            # False: 입력이 목적지 언어가 아니거나 불확실하면 침묵.
+            # True 로 두면 무음/잡음을 목적지 언어로 헛인식해 의미없는 음성(예: のね)을
+            # 계속 내뱉는다. 번역 전용 단방향 세션에서는 False 가 맞다.
+            echo_target_language=False,
         ),
     )
 

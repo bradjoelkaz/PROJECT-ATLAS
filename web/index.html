@@ -630,6 +630,7 @@
             playPcm(chunk);
             break;
           case "turn_complete":
+            if (playerNode) playerNode.port.postMessage({ cmd: "flush" });
             if (finalizeTimer) {
               clearTimeout(finalizeTimer);
               finalizeTimer = null;
@@ -657,7 +658,7 @@
         if (outputCtx.state === "suspended") await outputCtx.resume();
 
         micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
 
         await inputCtx.audioWorklet.addModule("pcm-processor.js");
